@@ -22,6 +22,7 @@
 #include <stdint.h>
 #include "../common/con.h"
 #include "../common/gs101.h"
+#include "ufs.h"
 
 #define BOOT_LINE_LENGTH	608
 #define PAGE_16K		0x4000UL
@@ -338,6 +339,10 @@ void board_main(uint64_t dtb)
 	wsr("sctlr_el2", rsr("sctlr_el2") | (1UL << 12));
 	__asm__ volatile("isb");
 
+#ifdef UFS_PROBE
+	stage = "ufs";
+	ufs_probe();
+#endif
 	stage = "load";
 	uint64_t entry = 0, ba = 0;
 	const char *err = load_xnu(&entry, &ba);

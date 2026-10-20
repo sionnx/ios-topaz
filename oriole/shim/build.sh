@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build the oriole shim -> out/shim-boot.img for `fastboot boot`.
-# Usage: build.sh [PAYLOAD [KERNEL]]  (PAYLOAD from tools/mkpayload.py with an
+# Usage: [UFS_PROBE=1] build.sh [PAYLOAD [KERNEL]]  (PAYLOAD from tools/mkpayload.py with an
 # ADT from `tools/mkadt.py OUT --board oriole`; without one the shim reports
 # and resets). KERNEL: the Mach-O in the payload; its sweet_log_ring /
 # sweet_log_total symbols let CPU0 copy xnu's console into ramoops.
@@ -13,13 +13,14 @@ abspath() { [ -z "$1" ] || echo "$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 set -- "$(abspath "${1:-}")" "$(abspath "${2:-}")"
 cd "$(dirname "$0")"
 . ../common/lib.sh
+[ "${UFS_PROBE:-0}" = 1 ] && CFLAGS="$CFLAGS -DUFS_PROBE"
 if [ -n "${2:-}" ]; then
 	ring=$(nm "$2" | awk '$3=="_sweet_log_ring"{print $1}')
 	total=$(nm "$2" | awk '$3=="_sweet_log_total"{print $1}')
 	[ -n "$ring" ] && [ -n "$total" ] || { echo "error: no sweet_log_ring/total in $2" >&2; exit 1; }
 	CFLAGS="$CFLAGS -DXNU_LOG_RING_VA=0x${ring}UL -DXNU_LOG_TOTAL_VA=0x${total}UL"
 fi
-build_image shim.c
+build_image shim.c ufs.c
 if [ -n "${1:-}" ]; then
 	size=$(stat -f %z out/Image)
 	truncate -s $(( (size + 0xfff) & ~0xfff )) out/Image
