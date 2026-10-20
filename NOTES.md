@@ -2,6 +2,23 @@
 
 ## >>> ORIOLE (Pixel 6, gs101) port - started 2026-10-20 (read first) <<<
 
+**Touch hardware (Pixel 6, for the driver in progress):** ST FingerTip **FTM5**
+(`st,fts`, chip id 0x3648, fw ftm5_fw_o6) on the Exynos **SPI @ 0x10D40000**
+(`samsung,exynos-spi`, USI-based, usi-offset 0xc, FIFO 64, spi-max 10 MHz, CS
+via GPIO, IRQ SPI 0x28e). Touch node `/spi@10D40000/touchscreen@0`: irq-gpio
+and reset-gpio (phandles), vdd/avdd regulators, **max-coords 0x437 x 0x95f =
+1079 x 2399 = the 1080x2400 panel pixels** (so pass raw coords straight to
+`sweet_hid_touch(finger, down, x, y)` - it maps 0-1079/0-2399 to the 1125x2436
+presented display, no scaling). The output HID side (SweetHID.cpp
+sweet_hid_touch / SweetHIDTouch) is reused unchanged; the new work is the
+Exynos SPI/USI programming + the FTM5 SPI event-read protocol, gated to oriole
+(topaz's sweet_touch.c FocalTech-on-GENI-I2C driver stays topaz-only, 0127).
+The bootloader leaves the FTM5 powered/running (Android used it), so plan to
+take over the running controller like UFS/USB (read the chip id, then poll the
+event FIFO -> sweet_hid_touch).
+
+
+
 Goal: move the topaz port to a Google Pixel 6 (`oriole`, Tensor gs101: 4x A55 +
 2x A76 + 2x X1). Plan: 0 backup, 1 shim probe, 2 shim EL2->EL1 + oriole ADT ->
 XNU console (`cpus=1`), 3 Exynos UFS driver -> HFS+ root in `userdata` (wipes
