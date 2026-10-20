@@ -44,19 +44,23 @@ QEMU_VTIMER_INTID = 27
 
 # --board oriole: Google Pixel 6 (gs101), values from its live FDT and the
 # oriole probe (NOTES.md, ORIOLE). xnu gets the upper 6 GiB of DRAM, which has
-# no reserved-memory in it; GIC-600; framebuffer DPP0 scans out; no UFS driver
-# yet, so no sweet-ufs node. One CPU node: the A55 at MPIDR 0x100, where the
-# shim enters xnu (SweetCPU panics unless the boot MPIDR is 0x100). No disp0:
+# no reserved-memory in it; GIC-600; framebuffer DPP0 scans out; sweet-ufs is
+# the Exynos host (UFSHCI + vendor HCI, kernel 0128+). CPUs: MPIDR 0x100-0x700 (A55 x3, A76 x2, X1 x2);
+# the shim enters xnu on the first, 0x100, and keeps CPU0 (0x000) for itself
+# (panel refresh, console pump). One cluster (SWEET: MAX_CPU_CLUSTERS 1);
+# kernels before 0127 only accept 0x100 (use cpus=1). No disp0:
 # AppleCLCD would map and poke topaz's MDP/DSI registers (0092-0107).
 ORIOLE = dict(
     phys_base=0x880000000, mem_size=0x180000000,
     gicd=0x10400000, gicr=0x10440000, gicr_size=0x100000,
     timebase=24576000, vtimer_intid=27,
     fb=0xfac00000, fb_size=0xa00000,
-    cpus=[0x100],
+    cpus=[c << 8 for c in range(1, 8)],
     compatible=['D22AP', 'iPhone10,3', 'google,oriole', 'xiaomi,sweet', 'google,gs101', 'AppleARM'],
     cpu_compatible=['arm,cortex-a55', 'qcom,kryo470', 'ARM,v8'],
     clock_frequency=1803000000,
+    ufs_compatible='google,gs101-ufs',
+    ufs_reg=(0x14700000, 0x200, 0x14701100, 0x200),	# UFSHCI, vendor HCI
 )
 
 BOOT_MANIFEST_HASH = hashlib.sha384(b'topaz boot manifest').digest()
@@ -232,8 +236,8 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, boar
     # bsd/dev/sweet_ufs.c: the UFS host ABL leaves running (absolute physical reg).
     ufs = node('sweet-ufs', [
         ph(),
-        ('compatible', cstr('qcom,ufshc')),
-        ('reg', u64(UFS, UFS_SIZE)),
+        ('compatible', cstr(ORIOLE['ufs_compatible'] if oriole else 'qcom,ufshc')),
+        ('reg', u64(*ORIOLE['ufs_reg']) if oriole else u64(UFS, UFS_SIZE)),
     ])
 
     # pmap_compute_max_asids requires the node even when no overrides are set.
@@ -269,7 +273,7 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, boar
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if qemu or oriole else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if qemu else [ufs]))
 
 
 if __name__ == '__main__':

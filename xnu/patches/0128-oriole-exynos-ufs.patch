@@ -1,0 +1,230 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sion <claude-0925@reao.io>
+Date: Tue, 20 Oct 2026 19:50:00 +0800
+Subject: [PATCH] oriole-0128: sweet_ufs on the Pixel 6's Exynos UFS host
+
+ADT /sweet-ufs compatible "google,gs101-ufs" (second reg pair: vendor HCI)
+selects the Exynos path, as found with oriole/shim/ufs.c: hibern8 exit
+before the takeover, START STOP UNIT (active) to the UFS Device W-LUN when
+the device answers NOT READY, byte-granular UTRD offsets/lengths, 4 KiB
+PRDT entries, the HCI_UTRL_NEXUS_TYPE bit, OCS 7 judged by the response
+UPIU, UTRLCLR with the slot bit. topaz is unchanged.
+
+---
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -65,7 +65,29 @@
+ #define REG_UTRLDBR     0x58
+ #define REG_UTRLCLR     0x5c
+ #define REG_UTRLRSR     0x60
++#define REG_UICCMD      0x90
++#define REG_UCMDARG1    0x94
++#define REG_UCMDARG2    0x98
++#define REG_UCMDARG3    0x9c
++#define IS_UCCS         (1u << 10)
++#define HCS_UCRDY       (1u << 3)
++#define UIC_DME_HIBERNATE_EXIT  0x18
+ 
++/*
++ * oriole (Pixel 6, gs101): Exynos UFS host, ADT /sweet-ufs compatible
++ * "google,gs101-ufs" with a second reg pair for the vendor HCI block. What
++ * differs from topaz's Qualcomm host (found with oriole/shim/ufs.c):
++ *   - the stock bootloader leaves the link in hibern8: DME_HIBERNATE_EXIT
++ *   - the device then answers NOT READY: START STOP UNIT (active) to the
++ *     UFS Device W-LUN
++ *   - UTRD response/PRDT offsets and lengths in bytes (PRDT_BYTE_GRAN)
++ *   - HCI_UTRL_NEXUS_TYPE bit per slot for SCSI commands
++ *   - OCS 7 whenever the response UPIU reports a failure (BROKEN_OCS_FATAL_ERROR)
++ *   - UTRLCLR takes the slot bit itself (BROKEN_REQ_LIST_CLR)
++ */
++#define VS_UTRL_NEXUS_TYPE      0x40
++#define WLUN_UFS_DEVICE         0xd0
++
+ #define HCS_DP          (1u << 0)
+ #define HCS_UTRLRDY     (1u << 1)
+ #define CAP_64AS        (1u << 24)              /* 64-bit DMA addressing */
+@@ -73,7 +95,8 @@
+ #define UFS_BLOCK       4096u
+ #define BOUNCE_SIZE     (1u << 20)
+ #define PRDT_CHUNK      (256u << 10)            /* PRDT byte count field: 18 bits */
+-#define PRDT_MAX        (BOUNCE_SIZE / PRDT_CHUNK)
++#define PRDT_CHUNK_EXYNOS 4096u                /* HCI_TX/RXPRDT_ENTRY_SIZE 12 (bootloader) */
++#define PRDT_MAX        (BOUNCE_SIZE / PRDT_CHUNK_EXYNOS)
+ #define CMD_TIMEOUT_NS  (5ull * NSEC_PER_SEC)
+ #define CMD_SPIN_NS     (50ull * NSEC_PER_USEC)
+ #define CMD_SLEEP_NS    (200ull * NSEC_PER_USEC)
+@@ -81,8 +104,8 @@
+ struct utrd {
+ 	uint32_t dw0, dw1, dw2, dw3;
+ 	uint32_t ucdba, ucdbau;
+-	uint32_t resp;          /* [31:16] response UPIU offset, [15:0] length, DWORDs */
+-	uint32_t prdt;          /* [31:16] PRDT offset (DWORDs), [15:0] entries */
++	uint32_t resp;          /* [31:16] response UPIU offset, [15:0] length, DWORDs (Exynos: bytes) */
++	uint32_t prdt;          /* [31:16] PRDT offset (DWORDs), [15:0] entries (Exynos: bytes, bytes) */
+ };
+ 
+ struct ucd {
+@@ -98,9 +121,13 @@
+ #define DMA_UCD         0x1000                  /* 128 byte aligned */
+ #define DMA_BOUNCE      0x4000
+ #define DMA_SIZE        (DMA_BOUNCE + BOUNCE_SIZE)
++_Static_assert(DMA_UCD + sizeof(struct ucd) <= DMA_BOUNCE, "UCD overlaps the bounce buffer");
+ 
+ static struct {
+ 	vm_offset_t regs;
++	vm_offset_t vs_regs;                    /* Exynos vendor HCI, 0 on topaz */
++	bool exynos;
++	uint8_t sense_key;                      /* of the last failed command */
+ 	vm_offset_t dma;                        /* kernel VA of the DMA allocation */
+ 	uint64_t dma_pa;
+ 	uint8_t lun;
+@@ -172,16 +199,17 @@
+ 	utrd->dw2 = 0x0f;                       /* OCS invalid until updated */
+ 	utrd->ucdba = (uint32_t)ucd_pa;
+ 	utrd->ucdbau = (uint32_t)(ucd_pa >> 32);
+-	utrd->resp = (512u / 4) << 16 | (512u / 4);
++	utrd->resp = su.exynos ? (512u << 16 | 512u) : ((512u / 4) << 16 | (512u / 4));
+ 	if (len) {
+-		uint32_t n = 0;
+-		for (uint32_t done = 0; done < len; done += PRDT_CHUNK, n++) {
+-			uint32_t chunk = MIN(PRDT_CHUNK, len - done);
++		uint32_t n = 0, max_chunk = su.exynos ? PRDT_CHUNK_EXYNOS : PRDT_CHUNK;
++		for (uint32_t done = 0; done < len; done += max_chunk, n++) {
++			uint32_t chunk = MIN(max_chunk, len - done);
+ 			ucd->prdt[n].addr_lo = (uint32_t)(bounce_pa + done);
+ 			ucd->prdt[n].addr_hi = (uint32_t)((bounce_pa + done) >> 32);
+ 			ucd->prdt[n].dbc = chunk - 1;
+ 		}
+-		utrd->prdt = (1024u / 4) << 16 | n;
++		utrd->prdt = su.exynos ? (1024u << 16 | n * (uint32_t)sizeof(ucd->prdt[0])) :
++		    ((1024u / 4) << 16 | n);
+ 	}
+ 
+ 	if (su.cache) {
+@@ -203,6 +231,10 @@
+ 			dma_sync(DMA_BOUNCE, len);
+ 		}
+ 	}
++	if (su.exynos) {
++		volatile uint32_t *nexus = (volatile uint32_t *)(su.vs_regs + VS_UTRL_NEXUS_TYPE);
++		*nexus |= 1u;                   /* slot 0 carries a SCSI command */
++	}
+ 	__builtin_arm_dsb(0xf);
+ 
+ 	ufs_wr(REG_UTRLDBR, 1);
+@@ -220,7 +252,7 @@
+ 	while (ufs_rd(REG_UTRLDBR) & 1) {
+ 		uint64_t now = mach_absolute_time();
+ 		if (now > deadline) {
+-			ufs_wr(REG_UTRLCLR, ~1u);
++			ufs_wr(REG_UTRLCLR, su.exynos ? 1u : ~1u);
+ 			printf("SWEET UFS: command 0x%02x timed out\n", cdb[0]);
+ 			return ETIMEDOUT;
+ 		}
+@@ -249,9 +281,14 @@
+ 	}
+ 
+ 	uint32_t ocs = utrd->dw2 & 0xff;
++	su.sense_key = ucd->resp[36] & 0xf;     /* fixed-format sense data from byte 34 */
++	if (su.exynos && ocs == 7) {
++		ocs = 0;                        /* judged by the response UPIU below */
++	}
+ 	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[6] || ucd->resp[7]) {
+-		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
+-		    cdb[0], ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7]);
++		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x sense %x/%x/%x\n",
++		    cdb[0], ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7], su.sense_key, ucd->resp[46],
++		    ucd->resp[47]);
+ 		return EIO;
+ 	}
+ 	return 0;
+@@ -473,7 +510,35 @@
+ 	return error;
+ }
+ 
++/* UIC command, polled; returns the config result code or -1 on timeout. */
+ static int
++ufs_uic(uint32_t cmd, uint32_t arg1, uint32_t arg2, uint32_t arg3)
++{
++	uint64_t deadline;
++	nanoseconds_to_absolutetime(500 * NSEC_PER_MSEC, &deadline);
++	deadline += mach_absolute_time();
++	while (!(ufs_rd(REG_HCS) & HCS_UCRDY)) {
++		if (mach_absolute_time() > deadline) {
++			return -1;
++		}
++		delay(1);
++	}
++	ufs_wr(REG_IS, IS_UCCS);
++	ufs_wr(REG_UCMDARG1, arg1);
++	ufs_wr(REG_UCMDARG2, arg2);
++	ufs_wr(REG_UCMDARG3, arg3);
++	ufs_wr(REG_UICCMD, cmd);
++	while (!(ufs_rd(REG_IS) & IS_UCCS)) {
++		if (mach_absolute_time() > deadline) {
++			return -1;
++		}
++		delay(1);
++	}
++	ufs_wr(REG_IS, IS_UCCS);
++	return (int)(ufs_rd(REG_UCMDARG2) & 0xff);
++}
++
++static int
+ ufs_take_over_host(void)
+ {
+ 	uint32_t hce = ufs_rd(REG_HCE), hcs = ufs_rd(REG_HCS);
+@@ -493,6 +558,14 @@
+ 	}
+ 	ufs_wr(REG_IE, 0);                      /* polled operation */
+ 	ufs_wr(REG_IS, ufs_rd(REG_IS));
++	if (su.exynos) {
++		/* The oriole bootloader parks the link in hibern8; a link that is not there just fails this. */
++		int r = ufs_uic(UIC_DME_HIBERNATE_EXIT, 0, 0, 0);
++		printf("SWEET UFS: Exynos host, DME_HIBERNATE_EXIT result %d\n", r);
++		if (r < 0) {
++			return EIO;
++		}
++	}
+ 	ufs_wr(REG_UTRLRSR, 0);
+ 	uint64_t list = su.dma_pa + DMA_UTRL;
+ 	ufs_wr(REG_UTRLBA, (uint32_t)list);
+@@ -761,6 +834,17 @@
+ 	su.cache = (cache == 1);
+ 	su.wait = (wait == 1);
+ 
++	char const *compat = NULL;
++	unsigned int compat_size = 0;
++	if (SecureDTGetProperty(node, "compatible", (void const **)&compat, &compat_size) == kSuccess &&
++	    compat_size >= sizeof("google,gs101-ufs") && strcmp(compat, "google,gs101-ufs") == 0) {
++		if (size < 4 * sizeof(uintptr_t)) {
++			printf("SWEET UFS: gs101 host without its vendor HCI reg\n");
++			return ENXIO;
++		}
++		su.exynos = true;
++		su.vs_regs = ml_io_map(reg[2], reg[3]);
++	}
+ 	su.regs = ml_io_map(reg[0], reg[1]);
+ 	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
+ 	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+@@ -779,9 +863,20 @@
+ 	error = ufs_take_over_host();
+ 	if (!error) {
+ 		static const uint8_t tur[6] = { 0x00 };
++		/* START STOP UNIT, power condition ACTIVE, no data */
++		static const uint8_t ssu[6] = { 0x1b, 0, 0, 0, 0x10, 0 };
+ 		/* The first command after the bootloader may report a unit attention. */
+ 		for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
+ 		}
++		if (error && su.exynos && su.sense_key == 2) {
++			/* NOT READY: the oriole bootloader leaves the device in a low power mode */
++			su.lun = WLUN_UFS_DEVICE;
++			int r = ufs_scsi(ssu, sizeof(ssu), 0, false);
++			su.lun = 0;
++			printf("SWEET UFS: START STOP UNIT (active) to the UFS Device W-LUN: %d\n", r);
++			for (int i = 0; i < 3 && (error = ufs_scsi(tur, sizeof(tur), 0, false)); i++) {
++			}
++		}
+ 	}
+ 	if (!error) {
+ 		error = ufs_find_partition(want);
