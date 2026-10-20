@@ -142,6 +142,40 @@ pstore-via-Android log path dies, so from then on debugging is the USB live log
 (0130). After that, boot 0130 with `rd=ufsroot0 ufsrw=1 rootrw=1` and the iOS
 userland bring-up begins.
 
+**🎉🎉 MILESTONE 2026-10-21 02:00: iOS 16.7.16 USERLAND BOOTS ON THE PIXEL 6.**
+The real iPhone X 16.7.16 (20H392) root (built by tools/mkiosroot-macos.sh,
+16 GB HFS+) is on the phone's `userdata`; xnu 0130 with `rd=ufsroot0 ufsrw=1
+rootrw=1 ... sweetusb=2` mounts it (no "unknown Volume Signature" this time)
+and **launchd starts the daemons - SpringBoard, backboardd, fairplayd.H2,
+bluetoothd, xpcproxy all exec**. SpringBoard then crashes (sig 5) on `!failed
+to find the main CADisplay`: oriole has no disp0/AppleCLCD node yet, so there
+is no framebuffer. Log `logs/ios-firstboot.txt` over the USB live channel.
+
+**Flashing the 16 GB root - what finally worked (important, 2026-10-20/21):**
+`fastboot flash userdata` of the full 16 GB raw image FAILS instantly with
+"Failed reading from userdata" (fastboot can't mmap a file over ~2 GB; the
+bootloader's max-download-size had also dropped to 249 MB after many ops).
+`fastboot erase` + a plain flash of the whole image is not viable. The fast
+Android-side `dd` path is ALSO dead here: /data is FBE-encrypted f2fs over a
+dm layer, and nothing can stop f2fs writing sda27 during the dd without
+either breaking KernelSU su (`stop`) or failing (`remount,ro` EBUSY; no
+`dmsetup`/fsfreeze that holds) - every in-Android dd got overwritten by FBE
+writeback. **The working method: `tools/... ` windowed sparse flash**
+(`/tmp/sparseflash.py IMG userdata`): split the raw image into <2 GB Android
+sparse (.simg) windows, each DONT_CARE outside its range, flash each with
+`fastboot flash userdata win.simg` from a LOCAL copy (not the external SSD).
+16x 1 GiB windows (2 all-zero skipped) = ~2 min, ~130 MB/s, bootloader writes
+sda27 raw so no f2fs/FBE corruption. Note: wiping userdata also wipes
+KernelSU's /data/adb root config (reinstall the manager APK + re-grant Shell
+Superuser to get su back); the Direct Install re-patch of init_boot makes the
+AVB "device corrupt" warning appear each boot (press power to continue).
+
+**Next: display.** SpringBoard needs a framebuffer. oriole's panel is a
+command-mode Samsung S6E3FC3 on DECON/DSIM (not Qualcomm MDP); options are a
+sweet-style IOMobileFramebuffer that software-renders into the 0xfac00000
+scanout the shim already drives, presented to iOS as an iPhone X panel, with
+an ADT disp0 node matching AppleCLCD but no MDP pokes (needs 0131+).
+
 **🎉 USB live log works on the Pixel 6 (0130, boot 22:45, `logs/usblive-0130.txt`).**
 0129 brought the gs101 DWC3 up from ADT /sweet-usb and made ue0, but the gadget
 stalled at "ep0 cmd timeout" (bootloader left GUSB2PHYCFG.SUSPHY set). **0130**
