@@ -1,5 +1,71 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ORIOLE (Pixel 6, gs101) port - started 2026-10-20 (read first) <<<
+
+Goal: move the topaz port to a Google Pixel 6 (`oriole`, Tensor gs101: 4x A55 +
+2x A76 + 2x X1). Plan: 0 backup, 1 shim probe, 2 shim EL2->EL1 + oriole ADT ->
+XNU console (`cpus=1`), 3 Exynos UFS driver -> HFS+ root in `userdata` (wipes
+Android: ask the user first), 4 debug channels (USB live log, UART), 5 input
+(ST FTM5 touch on SPI11, GPIO volume keys, PMIC power key, max1720x gauge),
+6 SMP/AMP on all 8 cores. Topaz's Qualcomm drivers (RPMh, GENI, MDP, modem,
+WLAN 0113-0126) do not apply.
+
+**Phone:** Pixel 6 `oriole` MP1.0, bootloader `slider-16.4-14548185`, unlocked
+(orange), Android 16 `CP1A.260405.005` with KernelSU root (adb `su` works).
+8 GB DRAM, 128 GB UFS (userdata = sda27).
+
+**Step 0 done (2026-10-20):** every partition except userdata backed up to
+`~/Startup/pixel6-backup-20261020/` (outside git: holds IMEI/serial), sha256
+device == host for all (`ALL-MATCH`): all by-name partitions raw, `sdb`/`sdc`/
+`sdd` whole LUNs, `sda` first/last 1 MiB (both GPT copies), `super.img.gz`,
+`live-oriole.dtb` (+ `.dts.txt` dump), `partition-table.txt`. 4.3 GB.
+
+**Step 1 done (probe, `oriole/probe/`, boot 18:30 local):** results from photos
+of the panel (`~/Startup/pixel6-backup-20261020/` has no copy yet; photos are
+the user's IMG_4317-4320):
+- **`fastboot boot` needs an AVB hash footer** even unlocked. Without one the
+  bootloader answers `Booting OKAY` and silently stays in fastboot (observed:
+  our image without footer, stock kernel with a minimal header, stock boot_a.img
+  with its footer cut off - all refused; stock boot_a.img as dumped boots).
+  `avbtool add_hash_footer --partition_name boot --partition_size 67108864`,
+  unsigned (algorithm NONE), works. Header v4, no ramdisk, os_version 0, empty
+  cmdline, raw (uncompressed) Image is accepted. `oriole/probe/build.sh` does
+  all of it (`AVBTOOL="python3 -I research/avbtool.py"`, avbtool.py from AOSP
+  external/avb main, not in git).
+- Entry: **EL2**, MMU off, image loaded at `0x80000000`, DTB at `0x8a000000`.
+  HCR_EL2 `0x80000002` (RW, SWIO, E2H=0), SCTLR_EL2 `0x30c50830`, CPTR_EL2
+  `0x33ff`, MDCR_EL2 `6`, CNTHCTL_EL2 `3`. CNTFRQ **24576000**.
+- PSCI 1.1 / SMCCC 1.1. CPU_ON for MPIDR `0x100..0x700` brings up all 7
+  secondaries, which also start at EL2. **PSCI SYSTEM_OFF / SYSTEM_RESET /
+  SYSTEM_RESET2 = NOT_SUPPORTED**: the probe's final PSCI reset did nothing,
+  the phone sat in wfe until a long Power press. Reset needs the PMU (mainline
+  gs101: syscon-reboot, PMU writes via SMC) or the watchdog.
+- All 8 cores: **TGran16 = 1** (16K pages everywhere: no Gold-only trick),
+  LSE = 2, RCpc = 1, PAN = 2, VH = 1, PARange = 2 (40 bit). MIDR A55
+  `412fd050`, A76 `414fd0b0`, X1 `411fd440`; MPIDR `0x81000n00`.
+- 20 M dependent adds (I-cache on, MMU off): A55 3.70 M ticks, A76 5.75 M,
+  X1 6.22 M -> the big cores are slower than the little ones as left by the
+  bootloader. Guess: big clusters at a low OPP in fastboot; DVFS via ACPM.
+- GIC-600: GICD `0x10400000` CTLR `0x10` TYPER `0x0079041e` IIDR `0x0201743b`;
+  GICR0-7 at `0x10440000` + n*`0x20000`, aff `0x000..0x700`, all awake (waker
+  0), Last on GICR7. ICC_SRE_EL2 9, ICC_SRE_EL1 1.
+- **Both watchdogs were running with reset enabled** (WDT0 `0x10060000` con
+  `0x1af39` dat `0xffaf`; WDT1 `0x10070000` con `0x18021` dat `0x8000`). Writing
+  WTCON = 0 stops them; the shim must do this first.
+- Display: DPP0 DMA (`0x1c0b0000`) already scans out **`0xfac00000`**
+  (RDMA_IN_CTRL_0 `0xff400000`, IMG_SIZE `0x09600438` = 2400x1080), even while
+  the fastboot menu is shown. a8r8g8b8 writes there + DECON0 TRIG_CON /
+  SHD_REG_UP_REQ kick show up on the panel. DPP1-5 idle.
+- ramoops (`0xfd3ff000`, console 2 MiB, no ECC) does NOT survive a normal
+  Linux reboot (marker written to /dev/kmsg, nothing in /sys/fs/pstore after
+  `adb reboot`).
+
+Reference: [m8l8th814n-eng/u-boot-gs101](https://github.com/m8l8th814n-eng/u-boot-gs101)
+(branch `oriole`, `board/google/oriole/`): U-Boot chainloaded by `fastboot
+boot` with UFS, USB CDC ACM, panel console. Its watchdog stop and display
+take-over sequences are what the probe uses. A candidate log reader for later
+(U-Boot over UFS + USB instead of topaz's OrangeFox).
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
