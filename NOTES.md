@@ -20,9 +20,9 @@ device == host for all (`ALL-MATCH`): all by-name partitions raw, `sdb`/`sdc`/
 `sdd` whole LUNs, `sda` first/last 1 MiB (both GPT copies), `super.img.gz`,
 `live-oriole.dtb` (+ `.dts.txt` dump), `partition-table.txt`. 4.3 GB.
 
-**Step 1 done (probe, `oriole/probe/`, boot 18:30 local):** results from photos
-of the panel (`~/Startup/pixel6-backup-20261020/` has no copy yet; photos are
-the user's IMG_4317-4320):
+**Step 1 done (probe, `oriole/probe/`, boots 18:30 / 18:57 local):** results
+from the panel (user's photos IMG_4317-4320) and from ramoops
+(`logs/probe2-ramoops.txt`, `logs/probe3-ramoops.txt`):
 - **`fastboot boot` needs an AVB hash footer** even unlocked. Without one the
   bootloader answers `Booting OKAY` and silently stays in fastboot (observed:
   our image without footer, stock kernel with a minimal header, stock boot_a.img
@@ -35,11 +35,12 @@ the user's IMG_4317-4320):
 - Entry: **EL2**, MMU off, image loaded at `0x80000000`, DTB at `0x8a000000`.
   HCR_EL2 `0x80000002` (RW, SWIO, E2H=0), SCTLR_EL2 `0x30c50830`, CPTR_EL2
   `0x33ff`, MDCR_EL2 `6`, CNTHCTL_EL2 `3`. CNTFRQ **24576000**.
+  DTB size `0x54656`.
 - PSCI 1.1 / SMCCC 1.1. CPU_ON for MPIDR `0x100..0x700` brings up all 7
   secondaries, which also start at EL2. **PSCI SYSTEM_OFF / SYSTEM_RESET /
-  SYSTEM_RESET2 = NOT_SUPPORTED**: the probe's final PSCI reset did nothing,
-  the phone sat in wfe until a long Power press. Reset needs the PMU (mainline
-  gs101: syscon-reboot, PMU writes via SMC) or the watchdog.
+  SYSTEM_RESET2 = NOT_SUPPORTED**: probe 2's final PSCI reset returned and
+  the phone sat in wfe. Use the watchdog (below) or the PMU (mainline gs101:
+  syscon-reboot, PMU writes via SMC).
 - All 8 cores: **TGran16 = 1** (16K pages everywhere: no Gold-only trick),
   LSE = 2, RCpc = 1, PAN = 2, VH = 1, PARange = 2 (40 bit). MIDR A55
   `412fd050`, A76 `414fd0b0`, X1 `411fd440`; MPIDR `0x81000n00`.
@@ -56,15 +57,36 @@ the user's IMG_4317-4320):
   (RDMA_IN_CTRL_0 `0xff400000`, IMG_SIZE `0x09600438` = 2400x1080), even while
   the fastboot menu is shown. a8r8g8b8 writes there + DECON0 TRIG_CON /
   SHD_REG_UP_REQ kick show up on the panel. DPP1-5 idle.
-- ramoops (`0xfd3ff000`, console 2 MiB, no ECC) does NOT survive a normal
-  Linux reboot (marker written to /dev/kmsg, nothing in /sys/fs/pstore after
-  `adb reboot`).
+- **Log channel = ramoops console zone** (`0xfd3ff000`, 2 MiB, no ECC, header
+  `DBGC`/start/size). The probe's text survives a forced reset (Power +
+  Volume up held 30 s) and a WDT0 reset and shows up in Android as
+  `/sys/fs/pstore/console-ramoops-0` (`oriole/probe/pull.sh OUT.txt` waits for
+  boot_completed and saves it; logs in `~/Startup/pixel6-backup-20261020/logs/`).
+  The stock bootloader writes its own log into the same zone, so the file is:
+  fastboot-session bootloader log, our text, next boot's bootloader log. The
+  bootloader log shows `avb_slot_verify ... OK_NOT_SIGNED` for our image and
+  `kernel: ... size:14000`. After a plain `adb reboot` pstore was empty
+  (guess: Android consumes/clears it; not checked).
+- **Reset: WDT0.** Probe 3 (18:57) restores the bootloader's WTCON `0x1af39`
+  with WTDAT = WTCNT = `0x100` after the PSCI reset returns: the SoC resets
+  at once and boots Android. A full probe cycle (fastboot boot -> run ->
+  reset -> Android -> pull.sh) takes ~1 min with no hands on the phone.
+- **Stuck phone:** Power alone (even 15 s+) does nothing; **Power + Volume up
+  held 30 s** forces a restart (user, 2026-10-20).
 
 Reference: [m8l8th814n-eng/u-boot-gs101](https://github.com/m8l8th814n-eng/u-boot-gs101)
 (branch `oriole`, `board/google/oriole/`): U-Boot chainloaded by `fastboot
 boot` with UFS, USB CDC ACM, panel console. Its watchdog stop and display
 take-over sequences are what the probe uses. A candidate log reader for later
 (U-Boot over UFS + USB instead of topaz's OrangeFox).
+
+**Next (step 2):** an oriole shim from `shim/` + `oriole/probe/`: stop both
+watchdogs, take over the display, log to screen + ramoops, EL2 -> EL1 drop
+(HCR_EL2.RW, CNTHCTL, CPTR, VTTBR 0, SPSR EL1h) for the boot CPU and a PSCI
+CPU_ON trampoline for secondaries, WDT0 reset on panic; `mkadt.py --board
+oriole` (8 cores in 3 clusters, timebase 24.576 MHz, GIC-600 addresses, DRAM
+`0x8_80000000` + 6 GiB, framebuffer `0xfac00000`); XNU `cpus=1` to the
+framebuffer console.
 
 ## Agent handoff / active work (2026-10-15, latest)
 

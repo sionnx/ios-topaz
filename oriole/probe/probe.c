@@ -52,7 +52,7 @@
 #define SMCCC_VERSION		0x80000000UL
 
 #define NR_CPUS		8
-#define PHOTO_DELAY_S	60
+#define PHOTO_DELAY_S	10
 
 #define rsr(r) ({ uint64_t _v; __asm__ volatile("mrs %0, " r : "=r"(_v)); _v; })
 #define wsr(r, v) __asm__ volatile("msr " r ", %0" : : "r"((uint64_t)(v)))
@@ -225,13 +225,32 @@ static void delay_ms(unsigned ms)
 		;
 }
 
+/* WTCON/WTDAT/WTCNT of both watchdogs as the bootloader left them. */
+static uint32_t wdt_regs[2][3];
+
+/*
+ * PSCI SYSTEM_RESET is NOT_SUPPORTED on this firmware (probe 2). Fall back to
+ * WDT0: the bootloader runs it with reset enabled (WTCON 0x1af39), so restore
+ * that WTCON with a tiny count. The ramoops console zone survives this kind
+ * of reset (as it survived Power + Volume up).
+ */
 static void __attribute__((noreturn)) reset_after(unsigned s)
 {
-	out("RESET in %d s (PSCI SYSTEM_RESET)\n", s);
+	out("RESET in %d s (PSCI SYSTEM_RESET, then WDT0)\n", s);
 	delay_ms(s * 1000);
 	__asm__ volatile("dsb sy" ::: "memory");
 	smc(PSCI_SYSTEM_RESET, 0, 0, 0);
-	out("SYSTEM_RESET returned\n");
+	uint32_t con = wdt_regs[0][0];
+	if (!(con & (1U << 5)) || !(con & 1U))
+		con = 0x1af39;
+	out("PSCI reset returned; WDT0 con %x cnt 0x100\n", con);
+	wr32(WDT_CL0, 0);
+	wr32(WDT_CL0 + 4, 0x100);
+	wr32(WDT_CL0 + 8, 0x100);
+	wr32(WDT_CL0, con);
+	__asm__ volatile("dsb sy" ::: "memory");
+	delay_ms(5000);
+	out("still alive 5 s after WDT0: cnt %x con %x\n", rd32(WDT_CL0 + 8), rd32(WDT_CL0));
 	for (;;)
 		__asm__ volatile("wfe");
 }
@@ -392,8 +411,6 @@ static void gic_info(void)
  * Exynos watchdogs: the oriole U-Boot port clears WTCON first thing. Stop
  * them before anything else and report the values the bootloader left.
  */
-static uint32_t wdt_regs[2][3];
-
 static void wdt_stop(void)
 {
 	for (int i = 0; i < 2; i++) {
@@ -475,7 +492,7 @@ void probe_main(uint64_t dtb)
 	fb_clear(BG);
 	display_kick();
 	stage = "id";
-	out("ORIOLE PROBE 2  (ios-topaz, Pixel 6 step 1)\n");
+	out("ORIOLE PROBE 3  (ios-topaz, Pixel 6 step 1)\n");
 	out("EL%d  image %lx  dtb %lx\n", cur_el, (uint64_t)(uintptr_t)_head, dtb);
 	if (dtb && (dtb & 3) == 0) {
 		uint32_t magic = __builtin_bswap32(rd32(dtb)), size = __builtin_bswap32(rd32(dtb + 4));
@@ -501,6 +518,5 @@ void probe_main(uint64_t dtb)
 	dpp_scan();
 	stage = "done";
 	out("PROBE DONE\n");
-	out("second photo: 30 s\n");
-	reset_after(30);
+	reset_after(5);
 }
