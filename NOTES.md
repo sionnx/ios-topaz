@@ -201,6 +201,15 @@ is only used as a partition name). ColorOS 16 builds (16.0.0.205,
 16.0.10.500) are behind the authenticated downloadCheck URL, not checked.
 Workaround if used anyway: A/B slots - flash only boot_b, `set_active b`,
 reboot; back with key-combo fastboot + `set_active a` (lk stays untouched).
+**MTK `fastboot boot` survey (2026-10-21), same method on 4 phones, all NO `boot`:**
+PLC110 Ace 5 Ultra (D9400+, CN 15.0.2.501), PMB110 Ace 6 Ultra (D9500,
+16.0.10.500), PMW110 Find X10 (D9600M, 17.0.0.114), PMX110 Find X10 Pro Max
+(D9600 Pro, 17.0.0.114; adds `upload`, `oem list_all`). All share MTK's
+app/fastboot command set; Oplus never registers `boot`. Not checked: D9500s
+phones (Xiaomi/POCO) and non-Oplus MTK OEMs. Tools: `tools/fw/` -
+oplus-ota-url.sh (OTA query + downloadCheck resolve), rpayload.py (one
+partition from a remote OTA zip by HTTP range), lkcmds.py + lktable.py
+(fastboot commands in an MTK lk.img). Downloads stay outside git.
 
 **Step 3 in progress (2026-10-20 evening):**
 - **xnu 0127** (sionnx/ios-topaz CI 39414858118, `xnu/out-0127`): SCTLR SPAN
