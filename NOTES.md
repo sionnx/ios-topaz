@@ -142,6 +142,17 @@ pstore-via-Android log path dies, so from then on debugging is the USB live log
 (0130). After that, boot 0130 with `rd=ufsroot0 ufsrw=1 rootrw=1` and the iOS
 userland bring-up begins.
 
+**🎉🎉🎉 MILESTONE 2026-10-21 02:22: DISPLAY LIT ON THE PIXEL 6 (xnu 0131).**
+SpringBoard no longer crashes (`CRASH SpringBoard` count 0); `SWEET FB:
+display on`, then `SWEET FB: swap 31 layer 0 surface 2 1125x2436 fmt BGRA` -
+SpringBoard composes full iPhone X (1125x2436) frames which AppleCLCD copies
+into the 0xfac00000 framebuffer the shim's CPU0 scans out. 0131: mkadt.py
+gives oriole a disp0 node (sweet,display, 1125x2436 canvas) so AppleCLCD
+matches, and AppleCLCD skips the Qualcomm MDP/DSI/INTF1 MMIO on a non-topaz
+board (PE_sweet_board_is_topaz), composing into fPixels with a dsb for the
+shim's write-combine read. Log `logs/ios-0131-display.txt`. Boot image: 0131
++ `rd=ufsroot0 ufsrw=1 rootrw=1 ... sweetusb=2`, MAX_RUN_S=0.
+
 **🎉🎉 MILESTONE 2026-10-21 02:00: iOS 16.7.16 USERLAND BOOTS ON THE PIXEL 6.**
 The real iPhone X 16.7.16 (20H392) root (built by tools/mkiosroot-macos.sh,
 16 GB HFS+) is on the phone's `userdata`; xnu 0130 with `rd=ufsroot0 ufsrw=1
