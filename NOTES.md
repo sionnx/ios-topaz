@@ -172,6 +172,20 @@ EFI PE runs (UEFI firmware, entry at EL1). But ID_AA64MMFR0_EL1 =
 16K-aligned shared cache), so canoe cannot run the port. Probe in `canoe/probe/`
 (bare + UEFI EFI variants). Pixel 6 stays the target.
 
+**Aside: OnePlus Ace 5 Ultra (PLC110, Dimensity 9400+ = MT6991) desk check
+(2026-10-21, no device in hand).** CPU is NOT a blocker: Arm TRMs give
+ID_AA64MMFR0_EL1 TGran16 = 0b0001 (16K supported), TGran16_2 = 0b0010 and
+PARange = 40-bit for all three core types (X925 TRM 102807 r0p2, X4 102484,
+A720 102530). Kernel + DT source exists: OnePlusOSS/android_kernel_oneplus_mt6991
+and android_kernel_modules_and_devicetree_oneplus_mt6991, branch
+`oneplus/mt6991_b_16.0.0_oneplus_ace5_ultra` (6.6, `dts/mediatek/mt6991.dts`,
+USB = MediaTek MTU3/xhci-mtk not DWC3, UFS = ufs-mediatek, GenieZone present).
+Bootloader unlock reported working (`fastboot flashing unlock`, no waiting
+period; MTK USB id 0e8d, host may print "serial is not match"). UNKNOWN until
+probed: whether MTK LK accepts `fastboot boot` (no report found either way),
+entry EL, and how much LK leaves initialised (UFS, display). Porting would
+redo the SoC bring-up (USB gadget, UFS quirks, clocks/power) done on gs101.
+
 **Step 3 in progress (2026-10-20 evening):**
 - **xnu 0127** (sionnx/ios-topaz CI 39414858118, `xnu/out-0127`): SCTLR SPAN
   (PAN fix), SweetCPU takes the ADT's MPIDRs, `PE_sweet_board_is_topaz()`
