@@ -149,8 +149,16 @@ the iOS root image.
   extracted (oriole ADT now has /product). Patched xnu tree for patch work:
   `/Volumes/passport/ios-topaz-work/bt-0126/x/xnu` (CI buildtree of 0126 +
   0127/0128 edits; pre-edit copies in `pre-0127/`, `pre-0128/`).
-- Next: boot 0128 with `rd=ufsroot0` read-only (userdata is still Android's
-  f2fs: expect the HFS mount to fail), build the iOS root image (macOS:
+- **0128 verified (boot 19:58, `logs/xnu-0128-ufs-ro.txt`, `rd=ufsroot0`
+  read-only, cpus=7):** `DME_HIBERNATE_EXIT result 0`, TUR NOT READY x3
+  (sense 2/0/0), SSU to W-LUN ok, GPT LUN0 + backup CRCs ok, `"userdata" on
+  LUN 0: first block 0x22f1e6, 112914 MiB` (= Android's sda27 start 18321200
+  sectors), `BSD root: ufsroot0`, then `hfs_ValidateHFSPlusVolumeHeader:
+  unknown Volume Signature : d059` (userdata is Android's metadata-encrypted
+  f2fs) and xnu retries the root mount forever (printing, so the 60 s quiet
+  reset never fired: phone needed Power + Volume up; shim now also resets
+  after MAX_RUN_S, default 240 s).
+- Next: build the iOS root image (macOS:
   hdiutil can attach the APFS DMGs; mkiosroot.sh is Linux-only), then the
   user decides on writing it to userdata (wipes Android, and pstore-via-
   Android stops working: need another log reader first).
