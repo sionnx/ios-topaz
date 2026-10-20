@@ -72,6 +72,9 @@ static volatile uint64_t refresh_count, xnu_entry, xnu_ba, xnu_cpu_up;
 #endif
 #define XNU_LOG_SIZE		(4UL << 20)
 #define XNU_IDLE_RESET_S	60	/* no new console output for this long: reset */
+#ifndef XNU_MAX_RUN_S
+#define XNU_MAX_RUN_S		240	/* reset after this long whatever xnu does (build.sh MAX_RUN_S=) */
+#endif
 
 /*
  * CPU0's EL2 stage 1, identity, 4K granule, 39-bit VA, one level-1 table of
@@ -118,6 +121,7 @@ static void pump(uint64_t ring_pa, uint64_t total_pa, uint64_t *seen)
 static void __attribute__((noreturn)) refresher(uint64_t ring_pa, uint64_t total_pa)
 {
 	uint64_t seen = 0, last_total = 0, last_change = now(), f = rsr("cntfrq_el0");
+	uint64_t deadline = XNU_MAX_RUN_S ? now() + XNU_MAX_RUN_S * f : ~0ULL;
 
 	for (;;) {
 		display_kick();
@@ -134,6 +138,12 @@ static void __attribute__((noreturn)) refresher(uint64_t ring_pa, uint64_t total
 			pump(ring_pa, total_pa, &seen);
 			out("\nSHIM: xnu console quiet for %d s (%lx bytes total), reset\n",
 			    XNU_IDLE_RESET_S, seen);
+			reset_after(0);
+		}
+		if (now() > deadline) {
+			pump(ring_pa, total_pa, &seen);
+			pump(ring_pa, total_pa, &seen);
+			out("\nSHIM: %d s run limit (%lx bytes total), reset\n", XNU_MAX_RUN_S, seen);
 			reset_after(0);
 		}
 	}
@@ -365,8 +375,8 @@ void board_main(uint64_t dtb)
 		reset_after(10);
 	uint64_t ring_pa = XNU_LOG_RING_VA ? XNU_LOG_RING_VA + xnu_pa_of_va : 0;
 	uint64_t total_pa = XNU_LOG_TOTAL_VA ? XNU_LOG_TOTAL_VA + xnu_pa_of_va : 0;
-	out("xnu console ring %lx total %lx -> ramoops; reset after %d s of quiet\n", ring_pa, total_pa,
-	    XNU_IDLE_RESET_S);
+	out("xnu console ring %lx total %lx -> ramoops; reset after %d s of quiet or %d s\n", ring_pa,
+	    total_pa, XNU_IDLE_RESET_S, XNU_MAX_RUN_S);
 	out("--- xnu console ---\n");
 	stage = "refresher";
 	con_screen = 0;
