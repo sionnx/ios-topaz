@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-# Flash a large raw image to a partition in <2GB Android-sparse windows.
-# Each window is one .simg: DONT_CARE before, RAW (zero-skipped) for the
-# window, DONT_CARE after -> fastboot writes only that window's blocks.
+# Flash a large raw image to a fastboot partition that fastboot itself cannot
+# flash whole.  `fastboot flash userdata big.img` fails with "Failed reading
+# from userdata" once the image is over ~2 GiB (fastboot mmaps the file and a
+# size/offset overflows), and the Android-side `dd` fast path is unusable when
+# /data is FBE-encrypted f2fs (writeback overwrites a raw dd).  This splits the
+# raw image into <2 GiB Android sparse (.simg) windows: each window is one
+# sparse file with DONT_CARE outside its block range and RAW (all-zero windows
+# skipped) inside, so `fastboot flash PART win.simg` writes only that window.
+# The bootloader writes the raw partition directly (no f2fs/FBE), so nothing
+# corrupts it.  ~130 MB/s, ~2 min for a 16 GiB image.  Run the image from a
+# LOCAL disk (fastboot also struggles to read a multi-GiB file off a slow/
+# external volume).  Usage:  sparseflash.py IMG PARTITION
 import os, struct, subprocess, sys
 IMG = sys.argv[1]; PART = sys.argv[2]
 BLK = 4096
-WIN_BLKS = 1024 * 1024 // 4 * 1024 // BLK  # ~1 GiB of blocks
-WIN_BLKS = (1024 * 1024 * 1024) // BLK      # 1 GiB window
+WIN_BLKS = (1024 * 1024 * 1024) // BLK      # 1 GiB window (< fastboot's ~2 GiB limit)
 total = os.path.getsize(IMG)
 total_blks = (total + BLK - 1) // BLK
 MAGIC = 0xed26ff3a
