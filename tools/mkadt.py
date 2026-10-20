@@ -210,7 +210,7 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, boar
         # No hardware: watchdogd checks IODeviceTree:/arm-io/wdt for no-pmu and
         # otherwise crashes trying to set the PMU boot stage (customer builds
         # ignore the -wdt_no_pmu boot-arg).
-        node('wdt', [ph(), ('no-pmu', u32(1))])] + ([] if oriole else [
+        node('wdt', [ph(), ('no-pmu', u32(1))]),
         # Main display: IOMobileFramebuffer.framework counts /arm-io children
         # with this device_type and reads the canvas size from the node
         # (the presented iPhone X size, see SweetFramebuffer.cpp);
@@ -224,7 +224,7 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, boar
             # backboardd ask for a hardware scaler that does not exist)
             ('canvas-width', u32(1080 if native else 1125)),
             ('canvas-height', u32(2400 if native else 2436)),
-        ])]))
+        ])])
 
     fbcon = node('sweet-fbcon', [
         ph(),

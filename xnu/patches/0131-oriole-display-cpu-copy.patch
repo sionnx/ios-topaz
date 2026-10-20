@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sion <claude-0925@reao.io>
+Date: Tue, 21 Oct 2026 02:30:00 +0800
+Subject: [PATCH] oriole-0131: AppleCLCD display on the Pixel 6 (CPU copy, no MDP)
+
+SpringBoard crashed with "!failed to find the main CADisplay": oriole had
+no disp0 node, so AppleCLCD never matched. Add it (mkadt.py --board oriole:
+device_type display-subsystem, compatible sweet,display, the iPhone X
+1125x2436 canvas) and make AppleCLCD skip the Qualcomm MDP/DSI/INTF1 MMIO on
+a non-topaz board: present() then composes layers straight into fPixels (the
+0xfac00000 boot framebuffer), which the shim's CPU0 scans out, and
+directPresent()/scanFrom() are skipped because fVig0 is NULL. fPixels is
+write-combine, so drain it with a dsb for the shim's non-cached read. topaz
+keeps the MDP path unchanged.
+
+---
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -40,6 +40,7 @@
+ extern "C" void sweet_console_retarget(vm_offset_t va);   /* osfmk/console/video_console.c */
+ extern "C" void (*sweet_console_show_hook)(void);
+ extern "C" void topaz_modem_init(void);             /* iokit/Kernel/arm/TopazModem.cpp (boot-arg modem=1) */
++extern "C" int PE_sweet_board_is_topaz(void);        /* pexpert/arm/pe_init.c */
+ extern "C" int sweet_console_copy_dirty(void *dst);
+ 
+ /*
+@@ -290,6 +291,15 @@
+ 		IOLog("SWEET FB: no vsync timer\n");
+ 		return false;
+ 	}
++	/*
++	 * topaz pokes the Qualcomm MDP (VIG0/CTL0), DSI0 and INTF1 to scan out
++	 * and set brightness. oriole (gs101) has none of that MMIO; its panel is
++	 * refreshed by the shim's CPU0 from the 0xfac00000 framebuffer, so leave
++	 * these NULL. present() then composes into fPixels and skips
++	 * directPresent()/scanFrom() (fVig0 == NULL).
++	 */
++	bool topaz = PE_sweet_board_is_topaz() != 0;
++	if (topaz) {
+ 	fVig0 = (volatile uint32_t *)ml_io_map(0x05e05000, 0x1000);
+ 	fCtl0 = (volatile uint32_t *)ml_io_map(0x05e02000, 0x1000);
+ 	fDsi = (volatile uint8_t *)ml_io_map(0x05e94000, 0x1000);
+@@ -332,6 +342,7 @@
+ 		    r[0x000 / 4], r[0x004 / 4], r[0x008 / 4], r[0x00c / 4], r[0x03c / 4], r[0x040 / 4],
+ 		    r[0x01c / 4], r[0x024 / 4], r[0x090 / 4], r[0x084 / 4]);
+ 	}
++	} /* if (topaz) */
+ 	if (fVig0 != NULL && fCtl0 != NULL) {
+ 		fBootSrc = fVig0[0x14 / 4];
+ 		fBootStride = fVig0[0x24 / 4];
+@@ -1002,6 +1013,9 @@
+ 	}
+ 	if (fFlip[0] != NULL) {
+ 		flipBack();
++	} else {
++		/* oriole: fPixels is write-combine; drain it for the shim's NC read */
++		__builtin_arm_dsb(0xf);  /* SY */
+ 	}
+ }
+ 
