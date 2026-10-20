@@ -24,7 +24,7 @@ if [ -n "${2:-}" ]; then
 	[ -n "$ring" ] && [ -n "$total" ] || { echo "error: no sweet_log_ring/total in $2" >&2; exit 1; }
 	CFLAGS="$CFLAGS -DXNU_LOG_RING_VA=0x${ring}UL -DXNU_LOG_TOTAL_VA=0x${total}UL"
 fi
-build_image shim.c ufs.c usb.c spi.c
+build_image shim.c ufs.c usb.c spi.c acpm.c
 if [ -n "${1:-}" ]; then
 	size=$(stat -f %z out/Image)
 	truncate -s $(( (size + 0xfff) & ~0xfff )) out/Image

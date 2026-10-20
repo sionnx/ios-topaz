@@ -362,6 +362,12 @@ void board_main(uint64_t dtb)
 #ifdef SPI_PROBE
 	stage = "spi";
 	spi_probe();
+	/* Probe-only image (no xnu payload): freeze the result on the panel so
+	 * it can be photographed. DECON keeps scanning the framebuffer, so the
+	 * static text stays on screen. No reset. */
+	out("\nSPI probe done -- frozen for photo (power+voldown to leave)\n");
+	for (;;)
+		__asm__ volatile("wfe");
 #endif
 	stage = "load";
 	uint64_t entry = 0, ba = 0;

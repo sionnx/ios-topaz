@@ -14,8 +14,10 @@ commit hash when the driver lands, since the vendor branch moves.
   (USI_CON) = 0.
 - **CS GPIO** = **gpp23 pin 3** on `google,gs101-pinctrl` @ **0x10C40000** (active config
   `spi11-cs`/`ts_spi_cs_active` use pin-function 1 = GPIO output, software-driven, active low).
-  NEED the gs101 pinctrl bank offset of gpp23 within 0x10C40000 (CON = bank+0x00, 4 bits/pin;
-  DAT = bank+0x04, 1 bit/pin). To drive CS: CON pin3 = 1 (output), DAT bit3 = 0 assert / 1 deassert.
+  gpp23 bank offset = **0x60** within 0x10C40000 (gs101_pin_peric1[] `GS101_PIN_BANK_EINTG(8,
+  0x60, "gpp23", ...)` in mainline `pinctrl-exynos-arm64.c`; bank type exynos850_bank_type_off:
+  CON = bank+0x00 4 bits/pin, DAT = bank+0x04 1 bit/pin). Absolute CON = **0x10C40060**,
+  DAT = **0x10C40064**. To drive CS: CON pin3 field = 1 (output); DAT bit3 = 0 assert / 1 deassert.
 - **IRQ GPIO** (st,irq-gpio): gpa9 on pinctrl@174D0000 (ts-irq) — not needed for polling.
 - **Reset GPIO** (st,reset-gpio): ts-reset on pinctrl@10C40000 — bootloader left FTM5 powered;
   a HW system reset over SPI (below) is enough, GPIO reset optional.
@@ -23,6 +25,22 @@ commit hash when the driver lands, since the vendor branch moves.
 - **Touch coords**: max 0x437 x 0x95f = **1079 x 2399 = the 1080x2400 panel pixels**, so pass
   straight to `sweet_hid_touch(finger, down, x, y)` (SweetHID.cpp maps 0-1079/0-2399 to the
   presented 1125x2436 display; no scaling).
+
+## CMU_PERIC1 clock — REQUIRED, the bootloader does NOT clock spi11
+SPI_PROBE run 1 (2026-10-21) proved the bootloader leaves spi11 unclocked (TX
+FIFO filled, nothing clocked out, STATUS 0x01000200 TX_LVL=8 RX_LVL=0). Android's
+touch driver clocks it; we must too. From mainline `clk-gs101.c` (DT ties spi11
+to IPCLK_4 + PCLK_4, all gs101 PERIC1 gates use **bit 21**):
+- CMU_PERIC1 base = **0x10C00000**.
+- MUX usi11 @ **0x10C00640** bit4: 0 = oscclk (24 MHz, no PLL dep), 1 = dout_cmu_peric1_ip.
+- DIV usi11 @ **0x10C0180C** bits[3:0] = divider-1. `clk_from_cmu=true`, so SPI
+  rate = this divider, NOT a controller prescaler. Probe uses oscclk /4 = 6 MHz.
+- ipclk gate @ **0x10C0202C** bit21; pclk gate @ **0x10C0204C** bit21;
+  usi11 reset-sync clk @ **0x10C02068** bit21 (belt-and-braces).
+- Then USI: SW_CONF @ 0x10C2100C = (v&~7)|2 (SPI); USI_CON (SPI+0xC4) &= ~bit0
+  (clear reset); USI_OPTION (SPI+0xC8) |= CLKREQ_ON(bit1), &= ~CLKSTOP_ON(bit2).
+Sequence: mux→div→gates→SW_CONF→USI_CON→USI_OPTION, then drive SPI. (exynos-usi.c
+exynos_usi_enable/configure.)
 
 ## Exynos SPI registers (offset from 0x10D40000)
 `CH_CFG 0x00, CLK_CFG 0x04, MODE_CFG 0x08, SLAVE_SEL 0x0C, INT_EN 0x10, STATUS 0x14,

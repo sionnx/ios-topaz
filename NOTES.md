@@ -17,6 +17,71 @@ The bootloader leaves the FTM5 powered/running (Android used it), so plan to
 take over the running controller like UFS/USB (read the chip id, then poll the
 event FIFO -> sweet_hid_touch).
 
+**SPI_PROBE run 1 (2026-10-21, shim `oriole/shim/spi.c` + GPP23_OFF=0x60, photo
+IMG_4335):** code ran cleanly, gpp23 offset correct. BUT the SPI transfer times
+out — the chip id read failed. Screen:
+`SPI: CH_CFG 0 STATUS 0 USI_CON 1 SW_CONF 0` / `gpp23 CON 00220000 DAT 30` /
+`rx timeout STATUS 01000200 lvl 0`. STATUS 0x01000200 decodes to TX_FIFO_LVL=8
+(all 8 bytes I pushed stuck in the TX FIFO, never clocked out), RX_FIFO_LVL=0.
+TX doesn't flow -> **no SCLK -> the SPI11 clock is NOT on.** Initial CH_CFG/STATUS
+= 0 confirms the bootloader never touched SPI11. So the TOUCH.md assumption
+"bootloader left it clocked" is WRONG for touch: UFS/USB clocks are on (bootloader
+needs them) but the touch SPI11 clock is enabled by Android's touch driver, not
+the bootloader.
+
+**SPI_PROBE runs 2-6 (2026-10-21) — SPI PHYSICAL LAYER FULLY WORKING.** The shim
+`oriole/shim/spi.c` now brings up SPI11 from cold, verified by an internal-loopback
+self-test (MODE_CFG SELF_LOOPBACK) that echoes `a5 5a 3c c3` correctly. What it
+took, all from mainline clk-gs101.c / spi-s3c64xx.c / exynos-usi.c + gs101 DT:
+- **CMU_PERIC1 clock** (base 0x10C00000): mux 0x640 bit4=0 (oscclk 24MHz, no PLL
+  dep), div 0x180C /4, gates 0x202C/0x204C/0x2068 all bit21. Verified readback.
+- **USI** SW_CONF 0x10C2100C=2 (SPI), USI_CON (spi+0xC4)=0, USI_OPTION (+0xC8)
+  CLKREQ_ON.
+- **pinmux gpp23-0/1/2 = func2** (CLK/MOSI/MISO) — the bootloader left them GPIO
+  input, the real reason the first fixes still read nothing (CON 0x10C40060 now
+  0x00220222). gpp23-3 = CS (software GPIO, cs_set).
+- **CS_AUTO**: SLAVE_SEL(0x0C)=CS_AUTO|NSC_CNT_2 (0x22). Setting SIG_INACT held CS
+  deasserted and produced NO clock — that was the big one.
+- FB_CLK(0x2C)=1 (DT feedback-delay), SWAP_CFG=0, MODE_CFG byte transfer.
+- s3c64xx PIO xfer order (PACKET_CNT | push TX | write CH_CFG), fifo level V2 bits.
+
+**But FTM5 chip id reads all 0x00** (no timeout — transfer completes, MISO just
+stays low), cold and after a soft system-reset, with full raw-rx = 00s. So the
+controller is perfect and **the FTM5 IC itself is dead: not powered / held in
+reset** (bootloader doesn't touch touch, same as the clock). Live DT facts:
+- reset = **gpp26-0** (pinctrl@10C40000 bank 0xc0); driving it didn't help alone.
+- vdd = **S2MPG10_LDO25** (L25M_TSP_DVDD 1.8V), avdd = **S2MPG10_LDO26**
+  (L26M_TS_AVDD 2.8V). Both on the **S2MPG10 PMIC** (acpm_mfd_bus@17500000), and
+  **neither LDO has regulator-always-on/boot-on in the DT -> default OFF**. This
+  is the current blocker: must power the two Touch LDOs (and get reset timing
+  right). S2MPG10 is driven **only via ACPM** (APM coprocessor; no SPMI/I3C from
+  the AP). Full static analysis done (ftm5 vendor driver `fts_chip_powercycle`
+  + gs ACPM source + live DT, subagent report).
+
+**ACPM IPC client written (2026-10-21), NOT yet tested on device.** New
+`oriole/shim/acpm.c` + `acpm.h` (added to build.sh), posts S2MPG10 PMIC reads/
+updates like the Linux acpm_mfd driver. Facts baked in (all from source/live DT):
+- APM SRAM 0x02039000, framework 0x02043000 (SRAM+0xa000); framework+0x08 =
+  ipc_channels SRAM offset; ch2 desc = SRAM + ipc_channels + 2*0x48. MFD IPC
+  channel = 2. Doorbell = 0x17610440, write (1<<2)=0x4.
+- channel_info at ch_desc+0x10; ring fields (internal off): rx_rear 0x10,
+  rx_front 0x14, rx_base 0x18, tx_rear 0x28, tx_front 0x2C, tx_base 0x30,
+  q_len 0x34, q_esz 0x38. AP SENDS on the rx_* ring, RECEIVES on tx_* (named
+  from the APM's view). base/front/rear are SRAM offsets (add 0x02039000).
+  **These offsets are the one unverified bit** — acpm_init() dumps the raw ch2
+  descriptor + sanity-checks (bases <0x40000, qlen 1-64, qesz 16-64) and refuses
+  to send if they look wrong. First on-device run = verify these against the dump.
+- Command: cmd[0]=(0x01<<8)|reg|(seq<<16) (TYPE=PMIC 0x01, speedy ch 0);
+  cmd[1]=FUNC|val<<8|mask<<16 (FUNC_UPDATE=2, READ=0). Reply: seq in cmd[0]
+  bits[21:16], status cmd[1] bits[31:24] (0=ok), read value bits[15:8].
+- LDO enable: reg 0x5C (LDO25 DVDD) = 0x2C(1.8V)+bit7; reg 0x5D (LDO26 AVDD) =
+  0x28(2.8V)+bit7. Sequence (spi.c ftm5_bringup): reset low, DVDD on, 1ms, AVDD
+  on, 5ms, 10ms, reset high, 60ms, read chip id. Reset gpp26-0 active low.
+- FTM5 SPI read frame + reset polarity were already correct; only LDO power was
+  missing. Image = `oriole/shim/out/shim-boot.img` (SPI_PROBE=1 GPP23_OFF=0x60),
+  freezes on panel (photos IMG_4336-4340). NEXT: user gets phone to fastboot,
+  `fastboot boot` it, photo the ACPM dump + chip id; expect 36 48 if LDOs enable.
+
 
 
 Goal: move the topaz port to a Google Pixel 6 (`oriole`, Tensor gs101: 4x A55 +
