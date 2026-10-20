@@ -185,6 +185,22 @@ period; MTK USB id 0e8d, host may print "serial is not match"). UNKNOWN until
 probed: whether MTK LK accepts `fastboot boot` (no report found either way),
 entry EL, and how much LK leaves initialised (UFS, display). Porting would
 redo the SoC bring-up (USB gadget, UFS quirks, clocks/power) done on gs101.
+**Firmware check (2026-10-21): the PLC110 LK has NO `fastboot boot`.** OTA
+PLC110_15.0.2.501(CN01) (official CDN componentota-manual-cn.allawnfs.com,
+25/08/08/ca2743bd...zip, 7.86 GB; only the `lk` partition was fetched by HTTP
+range from payload.bin). `lk` = MTK image container (lk, bl2_ext, aee,
+lk_main_dtb, lk_dtbo + certs), lk main body linked at 0xffff000090700000,
+unencrypted. fastboot_register = lk+0xa1dc (name, handler, w2, w3=forbidden
+when locked). All 29 registered commands: getvar: reboot reboot-bootloader
+reboot-fastboot reboot-recovery continue set_active: download: flash: erase:
+ultraflash: "oem ultraflash:" "oem ultraflash_en" + table at lk+0x1aa638
+(flashing unlock/lock/get_unlock_ability, oem set_enckey/get_key/p2u/
+dump_pllk_log/printk-ratelimit/usb2jtag/off-mode-charge/mrdump_out_set/
+mrdump_fallocate/mrdump_chkimg/get_socid/cdms). No "boot" (the "boot" string
+is only used as a partition name). ColorOS 16 builds (16.0.0.205,
+16.0.10.500) are behind the authenticated downloadCheck URL, not checked.
+Workaround if used anyway: A/B slots - flash only boot_b, `set_active b`,
+reboot; back with key-combo fastboot + `set_active a` (lk stays untouched).
 
 **Step 3 in progress (2026-10-20 evening):**
 - **xnu 0127** (sionnx/ios-topaz CI 39414858118, `xnu/out-0127`): SCTLR SPAN
