@@ -26,7 +26,6 @@ void display_kick(void)
 
 static uint32_t con_bg = BG;
 static int con_row, con_col;
-static uint32_t prz_len;
 
 void fb_clear(uint32_t bg)
 {
@@ -64,30 +63,39 @@ static void fb_char(char ch)
 	con_col++;
 }
 
-/* persistent_ram_buffer { u32 sig; u32 start; u32 size; u8 data[]; } */
+/*
+ * persistent_ram_buffer { u32 sig; u32 start; u32 size; u8 data[]; }, used as
+ * Linux does: start = next write offset, size = valid bytes (up to the
+ * capacity once wrapped), so pstore shows the latest RAMOOPS_CONSOLE bytes.
+ */
+#define PRZ_CAP		(RAMOOPS_CONSOLE - 12)
+static uint32_t prz_start, prz_size;
+
 static void prz_init(void)
 {
 	wr32(RAMOOPS_BASE + 0, PRZ_SIG);
 	wr32(RAMOOPS_BASE + 4, 0);
 	wr32(RAMOOPS_BASE + 8, 0);
-	prz_len = 0;
+	prz_start = prz_size = 0;
 }
 
-static void prz_char(char ch)
+void prz_putc(char ch)
 {
-	if (prz_len >= RAMOOPS_CONSOLE - 12)
-		return;
-	*(volatile uint8_t *)(RAMOOPS_BASE + 12 + prz_len) = (uint8_t)ch;
-	prz_len++;
-	/* start == size: the whole buffer is one unwrapped record */
-	wr32(RAMOOPS_BASE + 8, prz_len);
-	wr32(RAMOOPS_BASE + 4, prz_len);
+	*(volatile uint8_t *)(RAMOOPS_BASE + 12 + prz_start) = (uint8_t)ch;
+	prz_start = prz_start + 1 == PRZ_CAP ? 0 : prz_start + 1;
+	if (prz_size < PRZ_CAP)
+		prz_size++;
+	wr32(RAMOOPS_BASE + 8, prz_size);
+	wr32(RAMOOPS_BASE + 4, prz_start);
 }
+
+int con_screen = 1;
 
 static void out_char(char ch)
 {
-	fb_char(ch);
-	prz_char(ch);
+	if (con_screen)
+		fb_char(ch);
+	prz_putc(ch);
 }
 
 static void out_hex(uint64_t v, int digits)
@@ -133,7 +141,8 @@ void out(const char *fmt, ...)
 		}
 	}
 	va_end(ap);
-	display_kick();
+	if (con_screen)
+		display_kick();
 }
 
 /* ---- helpers ---- */

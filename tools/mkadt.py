@@ -45,14 +45,15 @@ QEMU_VTIMER_INTID = 27
 # --board oriole: Google Pixel 6 (gs101), values from its live FDT and the
 # oriole probe (NOTES.md, ORIOLE). xnu gets the upper 6 GiB of DRAM, which has
 # no reserved-memory in it; GIC-600; framebuffer DPP0 scans out; no UFS driver
-# yet, so no sweet-ufs node. One CPU node (the A55 xnu is entered on, MPIDR 0)
-# until the shim forwards secondaries from EL2.
+# yet, so no sweet-ufs node. One CPU node: the A55 at MPIDR 0x100, where the
+# shim enters xnu (SweetCPU panics unless the boot MPIDR is 0x100). No disp0:
+# AppleCLCD would map and poke topaz's MDP/DSI registers (0092-0107).
 ORIOLE = dict(
     phys_base=0x880000000, mem_size=0x180000000,
     gicd=0x10400000, gicr=0x10440000, gicr_size=0x100000,
     timebase=24576000, vtimer_intid=27,
     fb=0xfac00000, fb_size=0xa00000,
-    cpus=[0x000],
+    cpus=[0x100],
     compatible=['D22AP', 'iPhone10,3', 'google,oriole', 'xiaomi,sweet', 'google,gs101', 'AppleARM'],
     cpu_compatible=['arm,cortex-a55', 'qcom,kryo470', 'ARM,v8'],
     clock_frequency=1803000000,
@@ -204,7 +205,7 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, boar
         # No hardware: watchdogd checks IODeviceTree:/arm-io/wdt for no-pmu and
         # otherwise crashes trying to set the PMU boot stage (customer builds
         # ignore the -wdt_no_pmu boot-arg).
-        node('wdt', [ph(), ('no-pmu', u32(1))]),
+        node('wdt', [ph(), ('no-pmu', u32(1))])] + ([] if oriole else [
         # Main display: IOMobileFramebuffer.framework counts /arm-io children
         # with this device_type and reads the canvas size from the node
         # (the presented iPhone X size, see SweetFramebuffer.cpp);
@@ -218,7 +219,7 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, boar
             # backboardd ask for a hardware scaler that does not exist)
             ('canvas-width', u32(1080 if native else 1125)),
             ('canvas-height', u32(2400 if native else 2436)),
-        ])])
+        ])]))
 
     fbcon = node('sweet-fbcon', [
         ph(),

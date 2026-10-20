@@ -80,13 +80,54 @@ boot` with UFS, USB CDC ACM, panel console. Its watchdog stop and display
 take-over sequences are what the probe uses. A candidate log reader for later
 (U-Boot over UFS + USB instead of topaz's OrangeFox).
 
-**Next (step 2):** an oriole shim from `shim/` + `oriole/probe/`: stop both
-watchdogs, take over the display, log to screen + ramoops, EL2 -> EL1 drop
-(HCR_EL2.RW, CNTHCTL, CPTR, VTTBR 0, SPSR EL1h) for the boot CPU and a PSCI
-CPU_ON trampoline for secondaries, WDT0 reset on panic; `mkadt.py --board
-oriole` (8 cores in 3 clusters, timebase 24.576 MHz, GIC-600 addresses, DRAM
-`0x8_80000000` + 6 GiB, framebuffer `0xfac00000`); XNU `cpus=1` to the
-framebuffer console.
+**🎉 Step 2 done (2026-10-20 19:14, log `logs/xnu-0126-a.txt`): xnu 0126,
+unmodified (CI run 39292140455 of MakrSas/ios-topaz), boots on the Pixel 6 to
+`Waiting on <dict>...IOMedia...Apple_HFS` (root mount wait).** 6 GiB managed
+(389247 free 16K pages), SweetCPU `cpu=0 mpidr=0x100 came alive; SGI1 OK`,
+platform expert, AMFI/Sandbox stand-ins, HFS, network stack all up. Cycle:
+`oriole/run.sh oriole/shim/out/shim-boot.img LOG 420` (~3 min, no hands).
+How (oriole/shim/shim.c):
+- xnu runs on **CPU1 (MPIDR 0x100, an A55)**: topaz SweetCPU (0080/0082)
+  panics unless the boot MPIDR is 0x100 and only accepts Aff1 <= 1, Aff0 <=
+  3. ADT (`mkadt.py --board oriole`) lists that one CPU. CPU0 stays at EL2.
+- **CPU0 = panel refresher + console pump**: kicks DECON at ~30 Hz
+  (command-mode panel), turns on an EL2 identity map (xnu's 6 GiB WB inner
+  shareable so it reads CPU1's caches coherently; 2-4 GiB NC), copies new
+  bytes of xnu's console ring (0047 `sweet_log_ring` / `sweet_log_total`,
+  VAs from `nm` via `shim/build.sh PAYLOAD KERNEL`) into the ramoops console
+  zone (now a wrapping ring, latest ~2 MiB), and after 60 s without console
+  output resets through WDT0. So the whole xnu console is in pstore.
+- EL2 -> EL1 in `common/start.S enter_el1` (HCR_EL2 = RW only, timers and
+  FP untrapped, ICC_SRE_EL2 SRE|Enable, VBAR_EL2 stays on the shim: xnu
+  traps into EL2 are reported and reset).
+- GIC prepared as topaz's shim did (GICD |= 0x13, all GICRs Group 1, prio
+  0xa0, vtimer 27/ptimer 30/SGI1 enabled; ICC on the xnu CPU).
+- No `disp0` ADT node (AppleCLCD would poke topaz MDP/DSI 0x05e0xxxx);
+  boot-args `debug=0xc serial=3 cpus=1 keepsyms=1 -noprogress wdt=-1
+  sweetbattery=0 sweetcpufreq=0 sweetkeys=0 sweettouch=0 sweethw=0 modem=0`,
+  no `rd=`.
+Topaz-kernel hazards on oriole (subagent survey of all 126 patches, 2026-10-20):
+ungated Qualcomm MMIO in SweetBattery::start (0091 I2C1 0x01400000/0x00500000/
+0x04a84000, 0094 cpufreq 0x0f523000: off with sweetbattery=0 sweetcpufreq=0),
+AppleCLCD (MDP/DSI, avoided by no disp0), keys/touch (started by
+rd=ufsroot0's sweet_ufs_init), early fb at PA 0x9c000000 (0010/0012: plain
+unused DRAM here, harmless), SweetCPU MPIDR checks, `MAX_CPU_CLUSTERS 1`.
+**PAN:** 0081 dropped `__ARM_PAN_AVAILABLE__` and xnu's SCTLR_EL1_DEFAULT has
+no SPAN (bit 23): on the A55/A76/X1 (FEAT_PAN) every exception into EL1 sets
+PSTATE.PAN and copyin/copyout to user pages would fault. Fix before userland:
+add SCTLR_PAN_UNCHANGED to SCTLR_EL1_DEFAULT (bit 23 is RES1 on ARMv8.0, so
+topaz is unaffected).
+Kernel CI for oriole: fork **sionnx/ios-topaz** (gh login `sionnx`, Actions
+enabled, remote `fork`); MakrSas/ios-topaz is read-only for us.
+Not on this Mac: `research/ipsw-x/d22ap.adt` (iPhone X /product for the ADT),
+the iOS root image.
+
+**Next (step 3):** root filesystem. A `fastboot boot` image is capped at the
+64 MiB boot partition (AVB footer), so the 16 GB HFS root must come from UFS:
+an Exynos UFS path for sweet_ufs.c (base from ADT `/sweet-ufs`; Exynos
+quirks), the iOS root written to `userdata` (wipes Android: ask the user),
+then the kernel patches above (PAN, SweetCPU MPIDRs, ADT-gated Qualcomm
+drivers).
 
 ## Agent handoff / active work (2026-10-15, latest)
 

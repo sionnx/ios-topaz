@@ -10,11 +10,13 @@
  *   - copy the kernel segments to phys_base + (vmaddr - virt_base), place the
  *     ADT and boot_args behind the kernel
  *   - prepare the GIC as topaz's shim does (xnu hangs after initCPU without)
- *   - start the panel refresher on CPU7 (command-mode panel: DECON only
- *     sends a frame when kicked; xnu's console just writes memory)
- *   - drop to EL1 and jump to xnu with x0 = boot_args (physical)
+ *   - start xnu on CPU1 (MPIDR 0x100): EL2 -> EL1 with x0 = boot_args
+ *     (physical). The topaz kernel (0080/0082 SweetCPU) panics unless the
+ *     boot CPU is MPIDR 0x100, and 0x100 is a plain A55 here.
+ *   - keep CPU0 at EL2 as the panel refresher (command-mode panel: DECON
+ *     only sends a frame when kicked; xnu's console just writes memory)
  * The shim stays resident below xnu's RAM (0x80000000, xnu gets
- * 0x8_80000000+): CPU7 keeps running from it, and EL2 traps still land in
+ * 0x8_80000000+): CPU0 keeps running from it, and EL2 traps still land in
  * exc_handler.
  */
 #include <stdint.h>
@@ -23,7 +25,7 @@
 
 #define BOOT_LINE_LENGTH	608
 #define PAGE_16K		0x4000UL
-#define REFRESH_CPU		7	/* X1, MPIDR 0x700 */
+#define XNU_CPU			1	/* A55, MPIDR 0x100 */
 #define VTIMER_INTID		27	/* DT /timer: PPI 11 */
 #define PTIMER_INTID		30	/* PPI 14 (non-secure physical) */
 #define SGI_INTID		1
@@ -42,6 +44,7 @@ static const char *stage;	/* set at runtime: no absolute pointers in data */
 
 void exc_handler(uint64_t slot, uint64_t *regs)
 {
+	con_screen = 1;
 	fb_clear(BG_ERR);
 	out("\nSHIM EXCEPTION slot %d at EL%d stage %s mpidr %x\n", (uint32_t)slot,
 	    (uint32_t)(rsr("CurrentEL") >> 2), stage ? stage : "-", (uint32_t)rsr("mpidr_el1"));
@@ -53,27 +56,100 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 	reset_after(10);
 }
 
-/* ---- panel refresher on CPU7 ---- */
+/* ---- CPU0: panel refresher + xnu console pump; CPU1: xnu ---- */
 
-static volatile uint64_t refresh_count;
+static volatile uint64_t refresh_count, xnu_entry, xnu_ba, xnu_cpu_up;
 
-void secondary_main(uint64_t idx)
+/*
+ * xnu's console ring (0047 sweet_log_append: every _cnputs byte goes to
+ * sweet_log_ring[n % 4 MiB], sweet_log_total counts bytes). build.sh takes
+ * the VAs from the kernel's symbol table (-DXNU_LOG_RING_VA/_TOTAL_VA).
+ */
+#ifndef XNU_LOG_RING_VA
+#define XNU_LOG_RING_VA		0
+#define XNU_LOG_TOTAL_VA	0
+#endif
+#define XNU_LOG_SIZE		(4UL << 20)
+#define XNU_IDLE_RESET_S	60	/* no new console output for this long: reset */
+
+/*
+ * CPU0's EL2 stage 1, identity, 4K granule, 39-bit VA, one level-1 table of
+ * 1 GiB blocks: below 2 GiB Device-nGnRnE; 2-4 GiB (shim, framebuffer,
+ * ramoops) Normal non-cacheable, so the panel's DMA and a reset see every
+ * write; xnu's 6 GiB Normal write-back inner shareable, so reads of the
+ * console ring are coherent with CPU1's caches. Nothing else is mapped.
+ */
+static uint64_t l1_table[512] __attribute__((aligned(4096)));
+
+static void el2_mmu_on(void)
 {
-	if (idx != REFRESH_CPU)
-		return;
+	for (uint64_t gb = 0; gb < 2; gb++)
+		l1_table[gb] = (gb << 30) | (1UL << 10) | (0 << 2) | 1;	/* AF, attr0, block */
+	for (uint64_t gb = 2; gb < 4; gb++)
+		l1_table[gb] = (gb << 30) | (1UL << 10) | (3UL << 8) | (2 << 2) | 1;	/* attr2 NC */
+	for (uint64_t pa = XNU_PHYS_BASE; pa < XNU_PHYS_BASE + XNU_MEM_SIZE; pa += 1UL << 30)
+		l1_table[pa >> 30] = pa | (1UL << 10) | (3UL << 8) | (1 << 2) | 1;	/* attr1 WB, ISH */
+	__asm__ volatile("dsb sy" ::: "memory");
+	wsr("mair_el2", 0x44ff00UL);	/* attr0 Device-nGnRnE, attr1 WB RWA, attr2 NC */
+	/* RES1 31/23, PS 40-bit, TG0 4K, walks non-cacheable (the table was written with the D-cache off), T0SZ 25 */
+	wsr("tcr_el2", (1UL << 31) | (1UL << 23) | (2UL << 16) | 25);
+	wsr("ttbr0_el2", (uintptr_t)l1_table);
+	__asm__ volatile("isb; tlbi alle2; dsb sy; isb" ::: "memory");
+	wsr("sctlr_el2", rsr("sctlr_el2") | (1UL << 12) | (1UL << 2) | 1);	/* I, C, M */
+	__asm__ volatile("isb");
+}
+
+static uint64_t pump_done;	/* ring bytes already copied to ramoops */
+
+/* Copy the console bytes xnu has finished writing into ramoops. */
+static void pump(uint64_t ring_pa, uint64_t total_pa, uint64_t *seen)
+{
+	uint64_t total = *(volatile uint64_t *)total_pa;
+	/* bytes below the previously seen total are written (add, then store) */
+	uint64_t upto = *seen;
+	*seen = total;
+	if (upto - pump_done > XNU_LOG_SIZE)
+		pump_done = upto - XNU_LOG_SIZE;
+	for (; pump_done < upto; pump_done++)
+		prz_putc(*(volatile char *)(ring_pa + pump_done % XNU_LOG_SIZE));
+}
+
+static void __attribute__((noreturn)) refresher(uint64_t ring_pa, uint64_t total_pa)
+{
+	uint64_t seen = 0, last_total = 0, last_change = now(), f = rsr("cntfrq_el0");
+
 	for (;;) {
 		display_kick();
 		refresh_count++;
 		delay_ms(33);	/* ~30 Hz */
+		if (!ring_pa || (refresh_count & 7))
+			continue;
+		pump(ring_pa, total_pa, &seen);
+		if (seen != last_total) {
+			last_total = seen;
+			last_change = now();
+		} else if (now() - last_change > XNU_IDLE_RESET_S * f) {
+			pump(ring_pa, total_pa, &seen);
+			pump(ring_pa, total_pa, &seen);
+			out("\nSHIM: xnu console quiet for %d s (%lx bytes total), reset\n",
+			    XNU_IDLE_RESET_S, seen);
+			reset_after(0);
+		}
 	}
 }
 
-static void start_refresher(void)
+static void gic_cpu_interface(void);
+
+void secondary_main(uint64_t idx)
 {
-	int64_t r = (int64_t)smc(PSCI_CPU_ON, (uint64_t)REFRESH_CPU << 8, (uintptr_t)secondary_entry,
-				 REFRESH_CPU);
-	delay_ms(200);
-	out("refresher CPU%d: CPU_ON %x, kicks %d\n", REFRESH_CPU, (uint32_t)r, (uint32_t)refresh_count);
+	if (idx != XNU_CPU)
+		return;
+	wsr("sctlr_el2", rsr("sctlr_el2") | (1UL << 12));
+	__asm__ volatile("isb");
+	gic_cpu_interface();
+	xnu_cpu_up = rsr("mpidr_el1") | (1ULL << 63);
+	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
+	enter_el1(xnu_entry, xnu_ba);
 }
 
 /* ---- GIC ---- */
@@ -88,8 +164,8 @@ static void gicd_wait_rwp(void)
  * What topaz needed before xnu (shim.c test_gic + gold_gicr_prepare):
  * distributor Group 1 enabled with affinity routing, every redistributor
  * awake with its SGIs/PPIs in Group 1 at priority 0xa0 and the timers and
- * SGI1 enabled; the CPU interface of the boot CPU with PMR 0xf0, Group 1
- * on, EOImode 0. ICC_*_EL1 set here at EL2 carry over to EL1.
+ * SGI1 enabled; the CPU interface of the xnu CPU with PMR 0xf0, Group 1
+ * on, EOImode 0 (gic_cpu_interface; ICC_*_EL1 set at EL2 carry over).
  */
 static void gic_prepare(void)
 {
@@ -109,6 +185,13 @@ static void gic_prepare(void)
 			wr8(r + GICR_IPRIORITYR + id, 0xa0);
 		wr32(r + GICR_ISENABLER0, (1U << VTIMER_INTID) | (1U << PTIMER_INTID) | (1U << SGI_INTID));
 	}
+	out("GIC: GICD ctlr %x -> %x, GICR1 en %x\n", dctlr, rd32(GICD_BASE),
+	    rd32(GICR_BASE + GICR_STRIDE + GICR_ISENABLER0));
+}
+
+/* Per-CPU part, run on the CPU that enters xnu (carries over to EL1). */
+static void gic_cpu_interface(void)
+{
 	wsr("icc_sre_el1", rsr("icc_sre_el1") | 1);
 	__asm__ volatile("isb");
 	wsr("icc_ctlr_el1", rsr("icc_ctlr_el1") & ~2ULL);	/* EOImode 0 */
@@ -116,8 +199,6 @@ static void gic_prepare(void)
 	wsr("icc_bpr1_el1", 0);
 	wsr("icc_igrpen1_el1", 1);
 	__asm__ volatile("isb");
-	out("GIC: GICD ctlr %x -> %x, GICR0 en %x, ICC sre %x pmr %x\n", dctlr, rd32(GICD_BASE),
-	    rd32(GICR_BASE + GICR_ISENABLER0), (uint32_t)rsr("icc_sre_el1"), (uint32_t)rsr("icc_pmr_el1"));
 }
 
 /* ---- loader (shim/loader.c, embedded payload only) ---- */
@@ -181,6 +262,8 @@ static int magic_ok(const char *m)
 	return 1;
 }
 
+static uint64_t xnu_pa_of_va;	/* pa = va + this, for the kernel image */
+
 static const char *load_xnu(uint64_t *entry_pa, uint64_t *ba_out)
 {
 	uintptr_t pl = ((uintptr_t)_end + 0xfff) & ~0xfffUL;
@@ -193,6 +276,7 @@ static const char *load_xnu(uint64_t *entry_pa, uint64_t *ba_out)
 		return "payload RAM is not the 6 GiB at 0x8_80000000 (mkadt --board oriole?)";
 
 	uint64_t pa_of_va_base = p->phys_base - p->virt_base;	/* pa = va + this */
+	xnu_pa_of_va = pa_of_va_base;
 	out("payload %lx: %d segs, virt %lx entry %lx\n", (uint64_t)pl, p->nsegs, p->virt_base,
 	    p->entry_va);
 	out("RAM %lx + %lx\ncmdline: %s\n", p->phys_base, p->mem_size, p->cmdline);
@@ -263,12 +347,24 @@ void board_main(uint64_t dtb)
 	}
 	stage = "gic";
 	gic_prepare();
-	stage = "refresher";
-	start_refresher();
 
-	stage = "jump";
-	out("jump to xnu at %lx (EL1), boot_args %lx\n", entry, ba);
-	/* Written with the MMU and caches off; drop any stale I-cache lines too. */
-	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
-	enter_el1(entry, ba);
+	stage = "xnu cpu";
+	xnu_entry = entry;
+	xnu_ba = ba;
+	out("xnu entry %lx (EL1) on CPU%d, boot_args %lx\n", entry, XNU_CPU, ba);
+	__asm__ volatile("dsb sy" ::: "memory");
+	int64_t r = (int64_t)smc(PSCI_CPU_ON, (uint64_t)XNU_CPU << 8, (uintptr_t)secondary_entry, XNU_CPU);
+	delay_ms(100);
+	out("CPU_ON %x, xnu CPU mpidr %lx; CPU0 refreshes the panel\n", (uint32_t)r, xnu_cpu_up);
+	if (r != 0)
+		reset_after(10);
+	uint64_t ring_pa = XNU_LOG_RING_VA ? XNU_LOG_RING_VA + xnu_pa_of_va : 0;
+	uint64_t total_pa = XNU_LOG_TOTAL_VA ? XNU_LOG_TOTAL_VA + xnu_pa_of_va : 0;
+	out("xnu console ring %lx total %lx -> ramoops; reset after %d s of quiet\n", ring_pa, total_pa,
+	    XNU_IDLE_RESET_S);
+	out("--- xnu console ---\n");
+	stage = "refresher";
+	con_screen = 0;
+	el2_mmu_on();
+	refresher(ring_pa, total_pa);
 }

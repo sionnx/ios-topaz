@@ -21,6 +21,10 @@ void display_info(void);
 void wdt_info(void);
 /* %x (u32), %lx (u64, 16 digits), %d (u32 decimal), %s, %c */
 void out(const char *fmt, ...);
+/* Append to the ramoops console record only (it keeps the latest ~2 MiB). */
+void prz_putc(char ch);
+/* 0: out() stops drawing on the panel (someone else owns it), ramoops only. */
+extern int con_screen;
 
 uint64_t smc(uint64_t fn, uint64_t a1, uint64_t a2, uint64_t a3);
 uint64_t now(void);
