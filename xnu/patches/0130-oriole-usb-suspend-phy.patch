@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sion <claude-0925@reao.io>
+Date: Tue, 20 Oct 2026 22:30:00 +0800
+Subject: [PATCH] oriole-0130: clear DWC3 SUSPHY so the gs101 gadget enumerates
+
+On oriole the gadget got as far as "soft reset done" then "ep0 cmd 0x1
+timeout / endpoint 0 setup failed": the bootloader leaves
+GUSB2PHYCFG.SUSPHY set, the USB2 PHY suspends, and the first ep0 DEPCMD
+never completes. Clear GUSB2PHYCFG.SUSPHY/ENBLSLPM and GUSB3PIPECTL.SUSPHY
+after the soft reset (as Linux dwc3 core does), oriole only; topaz reaches
+the PHY through QSCRATCH and is unchanged.
+
+---
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -185,6 +185,11 @@
+  * ep0.c).
+  */
+ #define GCTL            0xc110
++#define GUSB2PHYCFG     0xc200
++#define   GUSB2_SUSPHY  (1u << 6)       /* suspend USB2 PHY: stalls DEPCMD if set */
++#define   GUSB2_ENBLSLPM (1u << 8)
++#define GUSB3PIPECTL    0xc2c0
++#define   GUSB3_SUSPHY  (1u << 17)      /* suspend USB3 PHY */
+ #define GEVNTADRLO      0xc400
+ #define GEVNTADRHI      0xc404
+ #define GEVNTSIZ        0xc408
+@@ -883,6 +888,20 @@
+ 		return;
+ 	}
+ 
++	/*
++	 * oriole (gs101): the bootloader leaves GUSB2PHYCFG.SUSPHY set, so the
++	 * USB2 PHY suspends and the first ep0 DEPCMD never completes ("ep0 cmd
++	 * timeout"). Linux dwc3 core clears SUSPHY (and the USB3 one) around
++	 * init; do the same here. topaz reaches the PHY through QSCRATCH and does
++	 * not need it.
++	 */
++	if (usb_oriole) {
++		dwc_wr(GUSB2PHYCFG, dwc_rd(GUSB2PHYCFG) & ~(GUSB2_SUSPHY | GUSB2_ENBLSLPM));
++		dwc_wr(GUSB3PIPECTL, dwc_rd(GUSB3PIPECTL) & ~GUSB3_SUSPHY);
++		printf("SWEET USB: cleared SUSPHY, GUSB2PHYCFG 0x%08x GUSB3PIPECTL 0x%08x\n",
++		    dwc_rd(GUSB2PHYCFG), dwc_rd(GUSB3PIPECTL));
++	}
++
+ 	dwc_wr(GEVNTADRLO, (uint32_t)(ud.dma_pa + UD_EVT));
+ 	dwc_wr(GEVNTADRHI, (uint32_t)((ud.dma_pa + UD_EVT) >> 32));
+ 	dwc_wr(GEVNTSIZ, (1u << 31) | UD_EVT_SIZE);     /* interrupt masked: polled */
