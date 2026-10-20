@@ -68,8 +68,7 @@ tdev=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$out" | 
 devs=("$tdev" "${devs[@]}")
 newfs_hfs -s -J -v iOSRoot "$tdev"
 mkdir "$work/root"
-mount -t hfs -o nobrowse "$tdev" "$work/root"
-diskutil enableOwnership "$work/root" >/dev/null
+mount -t hfs -o nobrowse,owners "$tdev" "$work/root"
 # No Spotlight index or fsevents log on the new volume.
 touch "$work/root/.metadata_never_index"
 mkdir -p "$work/root/.fseventsd" && touch "$work/root/.fseventsd/no_log"
