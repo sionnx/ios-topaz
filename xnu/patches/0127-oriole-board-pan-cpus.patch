@@ -1,0 +1,179 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sion <claude-0925@reao.io>
+Date: Tue, 20 Oct 2026 19:40:00 +0800
+Subject: [PATCH] oriole-0127: same kernel on the Pixel 6: PAN, ADT CPUs,
+ topaz-only Qualcomm drivers
+
+- SCTLR_EL1 SPAN: without __ARM_PAN_AVAILABLE__ keep PSTATE.PAN unchanged on
+  exception entry (FEAT_PAN cores would otherwise fault every copyio).
+- SweetCPU: accept the MPIDRs the ADT lists (Aff0 < 16, no Aff3) and expect
+  the boot on the first ADT CPU instead of topaz's fixed 0x100-0x103.
+- PE_sweet_board_is_topaz(): ADT root compatible "xiaomi,topaz". SM6225
+  cpufreq, battery I2C1, PMIC keys and touch start only there.
+
+---
+--- a/osfmk/arm64/proc_reg.h
++++ b/osfmk/arm64/proc_reg.h
+@@ -649,6 +649,18 @@
+ #define SCTLR_JOP_KEYS_DEFAULT  SCTLR_JOP_KEYS_ENABLED
+ #else /* !HAS_APPLE_PAC */
+ #define SCTLR_JOP_KEYS_DEFAULT  0
++#endif
++
++/*
++ * SWEET/topaz builds without __ARM_PAN_AVAILABLE__ (the Cortex-A53/A73 have
++ * no PAN) never clear PSTATE.PAN. On a FEAT_PAN core (oriole: A55/A76/X1)
++ * SPAN = 0 would set PAN on every exception into EL1 and break copyin/
++ * copyout, so keep PAN unchanged there. Bit 23 is RES1 without FEAT_PAN.
++ */
++#if !__ARM_PAN_AVAILABLE__
++#define SCTLR_SPAN_DEFAULT        SCTLR_PAN_UNCHANGED
++#else
++#define SCTLR_SPAN_DEFAULT        0
+ #endif
+ 
+ #define SCTLR_EL1_DEFAULT \
+@@ -656,7 +668,7 @@
+ 	 SCTLR_I_ENABLED | SCTLR_SED_DISABLED | SCTLR_CP15BEN_ENABLED |                    \
+ 	 SCTLR_SA0_ENABLED | SCTLR_SA_ENABLED | SCTLR_C_ENABLED | SCTLR_M_ENABLED |        \
+ 	 SCTLR_CSEH_DEFAULT | SCTLR_DSSBS_DEFAULT |                                        \
+-	 SCTLR_ROP_KEYS_DEFAULT | SCTLR_JOP_KEYS_DEFAULT)
++	 SCTLR_ROP_KEYS_DEFAULT | SCTLR_JOP_KEYS_DEFAULT | SCTLR_SPAN_DEFAULT)
+ 
+ /*
+  * Coprocessor Access Control Register (CPACR)
+--- a/pexpert/arm/pe_init.c
++++ b/pexpert/arm/pe_init.c
+@@ -863,3 +863,44 @@
+ 		dst[i] = ((const uint32_t *)buff)[i];
+ 	}
+ }
++
++#if defined(SWEET)
++/*
++ * The same SWEET kernel boots topaz (Redmi Note 12 4G, SM6225) and oriole
++ * (Pixel 6, gs101). topaz's Qualcomm drivers (battery I2C, cpufreq, PMIC
++ * keys, touch) poke fixed SM6225 addresses, so they start only when the ADT
++ * root compatible names topaz (tools/mkadt.py). Without a readable root
++ * compatible, assume topaz (the old behaviour).
++ */
++int PE_sweet_board_is_topaz(void);
++
++int
++PE_sweet_board_is_topaz(void)
++{
++	static const char want[] = "xiaomi,topaz";
++	DTEntry root;
++	void const *prop;
++	unsigned int size;
++
++	if (SecureDTLookupEntry(NULL, "/", &root) != kSuccess ||
++	    SecureDTGetProperty(root, "compatible", &prop, &size) != kSuccess) {
++		return 1;
++	}
++	/* NUL-separated list: compare each entry with want, NUL included */
++	const char *p = (const char *)prop, *end = p + size;
++	while (p < end) {
++		unsigned int i = 0;
++		while (p + i < end && i < sizeof(want) && p[i] == want[i]) {
++			if (want[i] == '\0') {
++				return 1;
++			}
++			i++;
++		}
++		while (p < end && *p != '\0') {
++			p++;
++		}
++		p++;
++	}
++	return 0;
++}
++#endif /* SWEET */
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -73,8 +73,12 @@
+ 	if (*(const uint32_t *)reg->getBytesNoCopy() != cpu->phys_id) {
+ 		return false;
+ 	}
+-	/* topaz (SM6225): MPIDR Aff1 = cluster, Aff0 = core: 0x0-0x3 A53, 0x100-0x103 A73 */
+-	if ((cpu->phys_id >> 8) > 1 || (cpu->phys_id & 0xff) > 3 ||
++	/*
++	 * CPUs come from the ADT (topaz: A73 0x100-0x103; oriole: Aff1 = core,
++	 * 0x100-0x700). signalCPU() needs Aff0 < 16 and no Aff3; Aff1/Aff2 are
++	 * encoded in the SGI.
++	 */
++	if ((cpu->phys_id & 0xff) >= 16 || (cpu->phys_id >> 24) != 0 ||
+ 	    topology->num_cpus > SWEET_SMP_MAX_CPUS) {
+ 		panic("SWEET CPU: invalid topology cpu=%u mpidr=0x%x count=%u",
+ 		    cpu->cpu_id, cpu->phys_id, topology->num_cpus);
+@@ -145,12 +149,13 @@
+ 		IOSleep(1);
+ 	}
+ 	/*
+-	 * topaz: the ADT lists only the A73 (gold) cores and the shim boots xnu
+-	 * on gold CPU 0x100 (the silver cluster has no 16K granule).
++	 * The shim enters xnu on the first CPU of the ADT (topaz: gold CPU 0x100,
++	 * the silver cluster has no 16K granule; oriole: 0x100, CPU0 stays with
++	 * the shim).
+ 	 */
+-	if (topology->boot_cpu->cpu_id != 0 || topology->boot_cpu->phys_id != 0x100) {
+-		panic("SWEET CPU: expected boot MPIDR 0x100 and logical CPU 0, got 0x%x/%u",
+-		    topology->boot_cpu->phys_id, topology->boot_cpu->cpu_id);
++	if (topology->boot_cpu->cpu_id != 0 || topology->boot_cpu->phys_id != topology->cpus[0].phys_id) {
++		panic("SWEET CPU: expected boot on the first ADT CPU (MPIDR 0x%x, logical 0), got 0x%x/%u",
++		    topology->cpus[0].phys_id, topology->boot_cpu->phys_id, topology->boot_cpu->cpu_id);
+ 	}
+ 	for (unsigned int i = 0; i < topology->num_cpus; i++) {
+ 		SweetCPU *cpu = __atomic_load_n(&sweet_cpus[i], __ATOMIC_ACQUIRE);
+--- a/iokit/Kernel/arm/SweetBattery.cpp
++++ b/iokit/Kernel/arm/SweetBattery.cpp
+@@ -18,6 +18,7 @@
+ /* bsd/dev/sweet_i2c1.c: topaz battery bus (QUP0 SE1) */
+ extern "C" int sweet_i2c1_init(void);
+ extern "C" int sweet_cpufreq_max(void);    /* bsd/dev/sweet_cpufreq.c */
++extern "C" int PE_sweet_board_is_topaz(void);   /* pexpert/arm/pe_init.c */
+ extern "C" int sweet_i2c1_read(uint8_t addr, uint8_t reg, uint8_t *buf, unsigned len);
+ 
+ class SweetBattery : public IOPMPowerSource {
+@@ -323,10 +324,14 @@
+ 	if (!IOPMPowerSource::start(provider)) {
+ 		return false;
+ 	}
+-	(void)sweet_cpufreq_max();
++	/* SM6225 cpufreq and I2C1 registers: topaz only (oriole has neither) */
++	bool topaz = PE_sweet_board_is_topaz() != 0;
++	if (topaz) {
++		(void)sweet_cpufreq_max();
++	}
+ 	int real = 1;   /* topaz: real gauge by default; sweetbattery=0 for the static fallback */
+ 	(void)PE_parse_boot_argn("sweetbattery", &real, sizeof(real));
+-	fReal = real == 1 && sweet_i2c1_init() == 0;
++	fReal = real == 1 && topaz && sweet_i2c1_init() == 0;
+ 	/* Publish a complete source BEFORE registerService wakes powerd. */
+ 	poll();
+ 	if (fReal) {
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -53,6 +53,7 @@
+ extern void sweet_keys_init(void);
+ extern void sweet_touch_init(void);
+ extern void sweet_usb_probe(void);
++extern int PE_sweet_board_is_topaz(void);       /* pexpert/arm/pe_init.c */
+ 
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -821,8 +822,12 @@
+ 	 */
+ 	int hw = 0;
+ 	(void)PE_parse_boot_argn("sweethw", &hw, sizeof(hw));
+-	sweet_touch_init();
+-	sweet_keys_init();
++	if (PE_sweet_board_is_topaz()) {
++		sweet_touch_init();
++		sweet_keys_init();
++	} else {
++		printf("SWEET UFS: topaz touch/keys skipped (not a topaz ADT)\n");
++	}
+ 	if (hw == 1) {
+ 		sweet_usb_probe();
+ 	} else {
