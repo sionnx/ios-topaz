@@ -122,8 +122,19 @@ enabled, remote `fork`); MakrSas/ios-topaz is read-only for us.
 Not on this Mac: `research/ipsw-x/d22ap.adt` (iPhone X /product for the ADT),
 the iOS root image.
 
-**0129 built (CI 39428292845, `xnu/out-0129`, 2026-10-20 ~21:11): USB live
-log on the Pixel 6 DWC_usb31.** sweet_usb_probe takes the gs101 DWC3 from ADT
+**🎉 USB live log works on the Pixel 6 (0130, boot 22:45, `logs/usblive-0130.txt`).**
+0129 brought the gs101 DWC3 up from ADT /sweet-usb and made ue0, but the gadget
+stalled at "ep0 cmd timeout" (bootloader left GUSB2PHYCFG.SUSPHY set). **0130**
+(CI 39438875021, `xnu/out-0130`) clears SUSPHY (USB2+USB3) after the soft reset
+on the oriole path; the CDC-ECM gadget then enumerates (host sees MAC
+02:00:5e:77:ee:01, e.g. en16) and the kernel console streams as UDP to
+192.168.7.1:5140. Host side (macOS): `sudo ifconfig <if> inet 192.168.7.1
+netmask 255.255.255.0`, then `nc -u -l 5140` (or `oriole/usblog.sh`); ARP shows
+the phone at 192.168.7.2 (02:00:5e:77:ee:02). Build the image with `MAX_RUN_S=0`
+(oriole/shim/build.sh) so it streams without the 240 s auto-reset. This is the
+log channel for after the userdata wipe (pstore-via-Android goes away then).
+
+**0129 (CI 39428292845): USB live log on the Pixel 6 DWC_usb31.** sweet_usb_probe takes the gs101 DWC3 from ADT
 /sweet-usb ("google,gs101-dwc3", reg 0x11110000) with no Qualcomm wrapper, and
 sweet_ufs_init calls it on a non-topaz ADT without sweethw=1. Image ready but
 UNTESTED on the phone: `oriole/shim/out/shim-boot.img` = 0129 + cmdline
