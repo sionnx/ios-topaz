@@ -31,11 +31,13 @@ done
 
 work=$(mktemp -d /tmp/iosroot.XXXXXX)
 devs=()
+ok=0
 cleanup() {
 	for d in "${devs[@]}"; do
 		hdiutil detach -force "$d" >/dev/null 2>&1 || true
 	done
 	rmdir "$work"/* "$work" 2>/dev/null || true
+	[[ $ok == 1 ]] || { echo "failed: removing partial $out" >&2; rm -f "$out"; }
 }
 trap cleanup EXIT
 
@@ -133,4 +135,5 @@ df -h "$root"
 umount "$root"
 fsck_hfs -fy "$tdev" || true
 fsck_hfs -fn "$tdev"
+ok=1
 echo "done: $out"
