@@ -4,7 +4,7 @@ def cstr(o):
     if not 0<=o<len(body): return None
     e=body.find(b'\0',o); s=body[o:e]
     return s.decode() if s and all(32<=c<127 for c in s) else None
-S=body.find(b'\0flashing unlock\0')+1
+A=(sys.argv[2] if len(sys.argv)>2 else 'flashing unlock').encode(); S=body.find(b'\0'+A+b'\0')+1
 hits=[]
 for o in range(0,len(body)-8,8):
     q=struct.unpack_from('<Q',body,o)[0]

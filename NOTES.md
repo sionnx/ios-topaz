@@ -206,7 +206,12 @@ PLC110 Ace 5 Ultra (D9400+, CN 15.0.2.501), PMB110 Ace 6 Ultra (D9500,
 16.0.10.500), PMW110 Find X10 (D9600M, 17.0.0.114), PMX110 Find X10 Pro Max
 (D9600 Pro, 17.0.0.114; adds `upload`, `oem list_all`). All share MTK's
 app/fastboot command set; Oplus never registers `boot`. Not checked: D9500s
-phones (Xiaomi/POCO) and non-Oplus MTK OEMs. Tools: `tools/fw/` -
+phones and other MTK OEMs. Xiaomi (same day, OTA from cdnorg.d.miui.com, links in
+XiaomiFirmwareUpdater/xmfirmwareupdater.github.io): dali REDMI K80 Ultra (D9400+,
+OS3.0.9.0.WONCNXM) and dash REDMI Turbo 5 Max / POCO X8 Pro Max (D9500s,
+OS3.0.306.0.WPLCNXM): also NO `boot`; 14 direct commands (+ `oem poweroff`) and an
+oem table (`lktable.py lk_main.bin "oem unlock"`: oem unlock/lock/get_token,
+idmgr-*, lks, ...). Xiaomi unlock = Mi Unlock token, gated by community quiz. Tools: `tools/fw/` -
 oplus-ota-url.sh (OTA query + downloadCheck resolve), rpayload.py (one
 partition from a remote OTA zip by HTTP range), lkcmds.py + lktable.py
 (fastboot commands in an MTK lk.img). Downloads stay outside git.
