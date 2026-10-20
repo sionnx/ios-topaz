@@ -23,6 +23,7 @@
 #include "../common/con.h"
 #include "../common/gs101.h"
 #include "ufs.h"
+#include "usb.h"
 
 #define BOOT_LINE_LENGTH	608
 #define PAGE_16K		0x4000UL
@@ -352,6 +353,10 @@ void board_main(uint64_t dtb)
 #ifdef UFS_PROBE
 	stage = "ufs";
 	ufs_probe();
+#endif
+#ifdef USB_PROBE
+	stage = "usb";
+	usb_probe();
 #endif
 	stage = "load";
 	uint64_t entry = 0, ba = 0;

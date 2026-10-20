@@ -1,0 +1,109 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sion <claude-0925@reao.io>
+Date: Tue, 20 Oct 2026 21:10:00 +0800
+Subject: [PATCH] oriole-0129: USB live log on the Pixel 6's DWC_usb31
+
+ADT /sweet-usb compatible "google,gs101-dwc3" (reg: DWC3 core) makes
+sweet_usb_probe() take that controller instead of the SM7150 one: no
+Qualcomm GCC/QUSB2 checks, no QSCRATCH VBUS override; the gadget (CDC-ECM
+ue0 192.168.7.2, live log to 192.168.7.1:5140) is unchanged. On a non-topaz
+ADT sweet_ufs_init() calls it without sweethw=1. sweetusb=2 starts it.
+
+---
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -9,6 +9,12 @@
+  * in after `fastboot boot`. It never writes a register, and it touches the
+  * DWC3 / PHY register blocks only when the GCC status registers say their
+  * power domain and clocks are on (an access to a gated block would hang).
++ *
++ * oriole (Pixel 6, gs101): ADT /sweet-usb compatible "google,gs101-dwc3",
++ * reg = the DWC_usb31 core (GSNPSID 0x33313130). The stock bootloader's
++ * fastboot gadget leaves it in device mode, halted, PHY up (oriole/shim/
++ * usb.c): no Qualcomm GCC/QUSB2 checks and no QSCRATCH VBUS override, the
++ * gadget below takes it over as it is. Not tied to sweethw there.
+  */
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <sys/param.h>
+@@ -21,6 +27,8 @@
+ #include <vm/pmap.h>
+ #include <vm/vm_kern.h>
+ #include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++#include <libkern/libkern.h>
+ #include <kern/locks.h>
+ #include <sys/kpi_mbuf.h>
+ #include <sys/kpi_socket.h>
+@@ -70,6 +78,25 @@
+ 	return v;
+ }
+ 
++/* oriole: the DWC3 core from ADT /sweet-usb, or 0 when the node is absent. */
++static vm_offset_t
++sweet_usb_adt_dwc(void)
++{
++	DTEntry node;
++	uintptr_t const *reg = NULL;
++	char const *compat = NULL;
++	unsigned int size = 0, csize = 0;
++
++	if (SecureDTLookupEntry(NULL, "/sweet-usb", &node) != kSuccess ||
++	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
++	    size < 2 * sizeof(uintptr_t) ||
++	    SecureDTGetProperty(node, "compatible", (void const **)&compat, &csize) != kSuccess ||
++	    csize < sizeof("google,gs101-dwc3") || strcmp(compat, "google,gs101-dwc3") != 0) {
++		return 0;
++	}
++	return ml_io_map(reg[0], reg[1]);
++}
++
+ void
+ sweet_usb_probe(void)
+ {
+@@ -80,6 +107,17 @@
+ 	/* sweetusb=0 off, 1 (default) report state only, 2 also start the USB device */
+ 	PE_parse_boot_argn("sweetusb", &enabled, sizeof(enabled));
+ 	if (!enabled) {
++		return;
++	}
++	vm_offset_t odwc = sweet_usb_adt_dwc();
++	if (odwc != 0) {
++		ud.oriole = true;
++		printf("SWEET USB: gs101 DWC3 GSNPSID 0x%08x GCTL 0x%08x GUSB2PHYCFG 0x%08x DCTL 0x%08x DSTS 0x%08x\n",
++		    usb_rd(odwc, 0xc120), usb_rd(odwc, 0xc110), usb_rd(odwc, 0xc200), usb_rd(odwc, 0xc704),
++		    usb_rd(odwc, 0xc70c));
++		if (enabled >= 2) {
++			sweet_usb_gadget_start(odwc);
++		}
+ 		return;
+ 	}
+ 	vm_offset_t gcc = ml_io_map(GCC_PA, GCC_SIZE);
+@@ -217,6 +255,7 @@
+ 
+ static struct {
+ 	vm_offset_t dwc;
++	bool        oriole;         /* gs101 DWC_usb31 from the ADT, no Qualcomm wrapper */
+ 	vm_offset_t dma;
+ 	uint64_t    dma_pa;
+ 	uint32_t    evt_pos;
+@@ -866,7 +905,7 @@
+ 	dwc_wr(DALEPENA, 0x3);
+ 	ud_start_setup();
+ 
+-	vm_offset_t qs = ml_io_map(QSCRATCH_PA, 0x100);
++	vm_offset_t qs = ud.oriole ? 0 : ml_io_map(QSCRATCH_PA, 0x100);
+ 	if (qs != 0) {
+ 		uint32_t hs = usb_rd(qs, QSCRATCH_HS_PHY_CTRL), ss = usb_rd(qs, QSCRATCH_SS_PHY_CTRL);
+ 		printf("SWEET USB: QSCRATCH HS_PHY_CTRL 0x%08x SS_PHY_CTRL 0x%08x GENERAL_CFG 0x%08x\n",
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -923,7 +923,8 @@
+ 	} else {
+ 		printf("SWEET UFS: topaz touch/keys skipped (not a topaz ADT)\n");
+ 	}
+-	if (hw == 1) {
++	/* oriole: sweet_usb_probe() takes the gs101 DWC3 from the ADT (no SM7150 MMIO) */
++	if (hw == 1 || !PE_sweet_board_is_topaz()) {
+ 		sweet_usb_probe();
+ 	} else {
+ 		printf("SWEET UFS: USB skipped (topaz, sweethw=0)\n");

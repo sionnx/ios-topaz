@@ -61,6 +61,7 @@ ORIOLE = dict(
     clock_frequency=1803000000,
     ufs_compatible='google,gs101-ufs',
     ufs_reg=(0x14700000, 0x200, 0x14701100, 0x200),	# UFSHCI, vendor HCI
+    usb_reg=(0x11110000, 0x10000),			# DWC_usb31 core (kernel 0129+)
 )
 
 BOOT_MANIFEST_HASH = hashlib.sha384(b'topaz boot manifest').digest()
@@ -240,6 +241,13 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, boar
         ('reg', u64(*ORIOLE['ufs_reg']) if oriole else u64(UFS, UFS_SIZE)),
     ])
 
+    # bsd/dev/sweet_usb.c (0129): oriole's DWC3, taken over from the bootloader's fastboot gadget.
+    usb = [node('sweet-usb', [
+        ph(),
+        ('compatible', cstr('google,gs101-dwc3')),
+        ('reg', u64(*ORIOLE['usb_reg'])),
+    ])] if oriole else []
+
     # pmap_compute_max_asids requires the node even when no overrides are set.
     # An absent pmap-max-asids property selects XNU's own MAX_ASIDS default.
     # No effaceable storage: keybagd then reads /private/var/keybags/systembag.kb
@@ -273,7 +281,7 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, boar
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if qemu else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if qemu else [ufs]) + usb)
 
 
 if __name__ == '__main__':
