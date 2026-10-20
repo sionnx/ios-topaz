@@ -3,6 +3,7 @@
 
 Only what the early boot path actually reads (see NOTES.md); every MMIO
 address comes from the topaz (Redmi Note 12 4G, SM6225 khaje) live FDT. Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem]
+  mkadt.py OUT.adt --board oriole   Pixel 6 (gs101), see ORIOLE below
 """
 import hashlib, os, struct, sys
 
@@ -41,6 +42,22 @@ VTIMER_INTID = 19
 QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE = 0x08000000, 0x080a0000, 62500000
 QEMU_VTIMER_INTID = 27
 
+# --board oriole: Google Pixel 6 (gs101), values from its live FDT and the
+# oriole probe (NOTES.md, ORIOLE). xnu gets the upper 6 GiB of DRAM, which has
+# no reserved-memory in it; GIC-600; framebuffer DPP0 scans out; no UFS driver
+# yet, so no sweet-ufs node. One CPU node (the A55 xnu is entered on, MPIDR 0)
+# until the shim forwards secondaries from EL2.
+ORIOLE = dict(
+    phys_base=0x880000000, mem_size=0x180000000,
+    gicd=0x10400000, gicr=0x10440000, gicr_size=0x100000,
+    timebase=24576000, vtimer_intid=27,
+    fb=0xfac00000, fb_size=0xa00000,
+    cpus=[0x000],
+    compatible=['D22AP', 'iPhone10,3', 'google,oriole', 'xiaomi,sweet', 'google,gs101', 'AppleARM'],
+    cpu_compatible=['arm,cortex-a55', 'qcom,kryo470', 'ARM,v8'],
+    clock_frequency=1803000000,
+)
+
 BOOT_MANIFEST_HASH = hashlib.sha384(b'topaz boot manifest').digest()
 
 # The iOS userland is the iPhone X (iPhone10,3 / D22AP) IPSW. MobileGestalt
@@ -76,11 +93,20 @@ def node(name, props=(), children=()):
     return n
 
 
-def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
-    """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py)."""
+def build(seed=None, qemu=False, highmem=False, native=False, midmem=False, board=None):
+    """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py).
+    board='oriole': Pixel 6 (ORIOLE)."""
     phys_base, mem_size = ((MID_PHYS_BASE, MID_MEM_SIZE) if midmem else
                            (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE))
     gicd, gicr, timebase = (QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE) if qemu else (GICD, GICR, TIMEBASE)
+    gicr_size, vtimer_intid = GICR_SIZE, QEMU_VTIMER_INTID if qemu else VTIMER_INTID
+    fb, fb_size = FB, FB_SIZE
+    oriole = board == 'oriole'
+    if oriole:
+        b = ORIOLE
+        phys_base, mem_size = b['phys_base'], b['mem_size']
+        gicd, gicr, gicr_size, timebase = b['gicd'], b['gicr'], b['gicr_size'], b['timebase']
+        vtimer_intid, fb, fb_size = b['vtimer_intid'], b['fb'], b['fb_size']
     seed = seed if seed is not None else os.urandom(64)
     phandle = iter(range(1, 1000))
     ph = lambda: ('AAPL,phandle', u32(next(phandle)))
@@ -91,8 +117,8 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
         ('dram-size', u64(mem_size)),
         ('random-seed', seed),
         ('debug-enabled', u32(1)),
-        ('firmware-version', cstr('topaz-shim')),
-        ('system-firmware-version', cstr('topaz-shim')),
+        ('firmware-version', cstr('oriole-shim' if oriole else 'topaz-shim')),
+        ('system-firmware-version', cstr('oriole-shim' if oriole else 'topaz-shim')),
         # iBoot's SHA-384 of the boot manifest; /sbin/mount -P 1 exits unless
         # it exists (bind mounts /private/preboot/<hex>/usr/standalone/firmware,
         # tolerating a missing directory). Fixed stand-in value.
@@ -134,12 +160,14 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
     # and uses cpus=N to select an initial prefix (N <= 8).
     # QEMU retains its original single-CPU tree: its MPIDRs differ from sweet.
     cpu_nodes = []
-    for core in range(1 if qemu else 4):
+    mpidrs = (ORIOLE['cpus'] if oriole else [0] if qemu else [0x100 | c for c in range(4)])
+    cpu_compat = (ORIOLE['cpu_compatible'] if oriole else ['qcom,kryo260', 'qcom,kryo470', 'ARM,v8'])
+    for core, mpidr in enumerate(mpidrs):
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
             ('device_type', cstr('cpu')),
-            ('compatible', cstr('qcom,kryo260') + cstr('qcom,kryo470') + cstr('ARM,v8')),
-            ('reg', u32(core if qemu else 0x100 | core)),  # actual MPIDR Aff1:Aff0, NOT logical ID
+            ('compatible', b''.join(cstr(c) for c in cpu_compat)),
+            ('reg', u32(mpidr)),  # actual MPIDR Aff1:Aff0, NOT logical ID
             ('cpu-id', u32(core)),   # descriptive: XNU assigns IDs by DT order
             ('cluster-id', u32(0)),  # descriptive; see ml_parse_cpu_topology
             ('cluster-type', u32(0)),  # homogeneous CLUSTER_TYPE_SMP, not AMP
@@ -149,7 +177,7 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
             ('l3-cache-id', u32(0)),
             ('state', cstr('running' if core == 0 else 'stopped')),
             ('timebase-frequency', u32(timebase)),
-            ('clock-frequency', u32(2803200000)),
+            ('clock-frequency', u32(ORIOLE['clock_frequency'] if oriole else 2803200000)),
             ('bus-frequency', u32(100000000)),
             ('memory-frequency', u32(1866000000)),
             ('peripheral-frequency', u32(timebase)),
@@ -162,8 +190,8 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
         ph(),
         ('compatible', cstr('arm,gic-v3')),
         ('interrupt-controller', b''),
-        ('virtual-timer-intid', u32(QEMU_VTIMER_INTID if qemu else VTIMER_INTID)),
-        ('reg', u64(gicd - SOC_BASE, GICD_SIZE, gicr - SOC_BASE, GICR_SIZE)),
+        ('virtual-timer-intid', u32(vtimer_intid)),
+        ('reg', u64(gicd - SOC_BASE, GICD_SIZE, gicr - SOC_BASE, gicr_size)),
     ])
     arm_io = node('arm-io', [
         ph(),
@@ -194,7 +222,7 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
 
     fbcon = node('sweet-fbcon', [
         ph(),
-        ('reg', u64(FB, FB_SIZE)),
+        ('reg', u64(fb, fb_size)),
         ('width', u32(FB_W)),
         ('height', u32(FB_H)),
         ('stride', u32(FB_STRIDE)),
@@ -229,21 +257,25 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
     # hw.model/hw.target (D22AP), model is hw.machine/hw.product
     # (iPhone10,3). 'xiaomi,sweet' and qcom,kryo470 stay because the
     # SweetPlatformExpert and CPU IONameMatch still use them.
+    compat = (ORIOLE['compatible'] if oriole else
+              ['D22AP', 'iPhone10,3', 'xiaomi,topaz', 'xiaomi,sweet', 'qcom,khaje', 'AppleARM'])
     return node('device-tree', [
         ph(),
-        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,topaz') + cstr('xiaomi,sweet') + cstr('qcom,khaje') + cstr('AppleARM')),
+        ('compatible', b''.join(cstr(c) for c in compat)),
         ('model', cstr('iPhone10,3')),
         ('target-type', cstr('D22')),
         ('target-sub-type', cstr('D22AP')),
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if qemu else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if qemu or oriole else [ufs]))
 
 
 if __name__ == '__main__':
+    board = sys.argv[sys.argv.index('--board') + 1] if '--board' in sys.argv else None
+    assert board in (None, 'oriole'), f'unknown board {board}'
     root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
-                 native='--native' in sys.argv, midmem='--midmem' in sys.argv)
+                 native='--native' in sys.argv, midmem='--midmem' in sys.argv, board=board)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:

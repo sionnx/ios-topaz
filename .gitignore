@@ -9,3 +9,4 @@ xnu/out/
 xnu/out-*/
 __pycache__/
 oriole/*/out/
+oriole/out/
