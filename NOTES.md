@@ -122,6 +122,26 @@ enabled, remote `fork`); MakrSas/ios-topaz is read-only for us.
 Not on this Mac: `research/ipsw-x/d22ap.adt` (iPhone X /product for the ADT),
 the iOS root image.
 
+**iOS root image built on macOS (2026-10-20 23:21).** `tools/mkiosroot-macos.sh`
+(macOS counterpart of the Linux mkiosroot.sh: hdiutil to attach the APFS DMGs,
+newfs_hfs/mount -o owners, rsync -aH as root, --tweaks runs sweet-root-tweaks.py)
+built `/Volumes/passport/ios-topaz-work/ios16-root.img` (16 GB, 11 GB used) from
+the 20H392 IPSW DMGs in `/Volumes/passport/ios-topaz-work/dmg/` (OS 087-86698-044,
+SystemOS 087-86593-047, AppOS 087-86715-047). Verified: full iOS root, both
+cryptexes, hard-linked dyld cache, systembag.kb (0700 root), launchd _PanicOnCrasX
+renamed + main com.apple.CommCenter removed (the two CommCenter*Helper jobs stay,
+as on topaz), logd .migrated markers, purplebuddy/springboard/migration prefs.
+data_ark skipped (no mobileactivationd container in a fresh IPSW root; Hactivation
+handles it). Two script fixes landed: mount with `-o owners` (diskutil
+enableOwnership needs a diskutil mount), and remove the partial image on failure.
+A stale `/dev/disk31` mount from the first failed run is left (busy; clears on reboot).
+
+**Next (destructive, needs the user's explicit OK each step):** flash this HFS+
+image into the Pixel 6 `userdata` partition - this WIPES Android, and the
+pstore-via-Android log path dies, so from then on debugging is the USB live log
+(0130). After that, boot 0130 with `rd=ufsroot0 ufsrw=1 rootrw=1` and the iOS
+userland bring-up begins.
+
 **🎉 USB live log works on the Pixel 6 (0130, boot 22:45, `logs/usblive-0130.txt`).**
 0129 brought the gs101 DWC3 up from ADT /sweet-usb and made ue0, but the gadget
 stalled at "ep0 cmd timeout" (bootloader left GUSB2PHYCFG.SUSPHY set). **0130**
