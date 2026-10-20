@@ -122,12 +122,38 @@ enabled, remote `fork`); MakrSas/ios-topaz is read-only for us.
 Not on this Mac: `research/ipsw-x/d22ap.adt` (iPhone X /product for the ADT),
 the iOS root image.
 
-**Next (step 3):** root filesystem. A `fastboot boot` image is capped at the
-64 MiB boot partition (AVB footer), so the 16 GB HFS root must come from UFS:
-an Exynos UFS path for sweet_ufs.c (base from ADT `/sweet-ufs`; Exynos
-quirks), the iOS root written to `userdata` (wipes Android: ask the user),
-then the kernel patches above (PAN, SweetCPU MPIDRs, ADT-gated Qualcomm
-drivers).
+**Step 3 in progress (2026-10-20 evening):**
+- **xnu 0127** (sionnx/ios-topaz CI 39414858118, `xnu/out-0127`): SCTLR SPAN
+  (PAN fix), SweetCPU takes the ADT's MPIDRs, `PE_sweet_board_is_topaz()`
+  (ADT root compatible `xiaomi,topaz`) gates SM6225 cpufreq/battery I2C/keys/
+  touch. **Boot 19:41 (`logs/xnu-0127-smp7.txt`): 7 CPUs up** (ADT
+  0x100-0x700, `cpus=7`; xnu's own PSCI CPU_ON, secondaries enter at EL2 and
+  sweet_secondary_entry drops them), SGI1 verified on all, battery static
+  without any boot-arg. CPU0 stays the shim's.
+- **UFS read path proven from the shim** (`UFS_PROBE=1 oriole/shim/build.sh`,
+  logs `ufsprobe-1..4.txt`): host left enabled (HCE 1, HCS 0x10f, HS-G4 x2,
+  list at 0xf8c40000) but **link in hibern8** (commands never fetched, OCS
+  0xf) -> `DME_HIBERNATE_EXIT` -> device **NOT READY** (sense key 2) ->
+  START STOP UNIT (active) to W-LUN 0xd0 -> TUR ok, INQUIRY `SKhynix
+  HN8T05BZGKX015`, READ(10) LUN0 LBA1 = GPT header identical to the backup,
+  also with data DMA'd to 0x9_00000000 (xnu RAM). Exynos format: UTRD
+  response/PRDT offsets+lengths in bytes (bootloader's own UTRDs confirm),
+  4 KiB PRDT entries (TX/RXPRDT_ENTRY_SIZE 12), NEXUS_TYPE bit per slot
+  (vendor HCI 0x14701140), OCS 7 = look at the response UPIU.
+- **xnu 0128** (CI 39416968979): that Exynos path in sweet_ufs.c, selected by
+  ADT `/sweet-ufs` compatible `google,gs101-ufs`, reg <0x14700000 0x200
+  0x14701100 0x200>; `mkadt.py --board oriole` now emits it.
+- iOS 16.7.16 20H392 iPhone10,3 IPSW downloading with aria2c to
+  `/Volumes/passport/ios-topaz-work/ipsw-20H392/` (external SSD, HFS+, 87 GB
+  free; the Mac's own disk has ~18 GB). `research/ipsw-x/d22ap.adt`
+  extracted (oriole ADT now has /product). Patched xnu tree for patch work:
+  `/Volumes/passport/ios-topaz-work/bt-0126/x/xnu` (CI buildtree of 0126 +
+  0127/0128 edits; pre-edit copies in `pre-0127/`, `pre-0128/`).
+- Next: boot 0128 with `rd=ufsroot0` read-only (userdata is still Android's
+  f2fs: expect the HFS mount to fail), build the iOS root image (macOS:
+  hdiutil can attach the APFS DMGs; mkiosroot.sh is Linux-only), then the
+  user decides on writing it to userdata (wipes Android, and pstore-via-
+  Android stops working: need another log reader first).
 
 ## Agent handoff / active work (2026-10-15, latest)
 
