@@ -152,6 +152,14 @@ matches, and AppleCLCD skips the Qualcomm MDP/DSI/INTF1 MMIO on a non-topaz
 board (PE_sweet_board_is_topaz), composing into fPixels with a dsb for the
 shim's write-combine read. Log `logs/ios-0131-display.txt`. Boot image: 0131
 + `rd=ufsroot0 ufsrw=1 rootrw=1 ... sweetusb=2`, MAX_RUN_S=0.
+Confirmed on the panel (user photo 02:23): the **iOS 16 lock screen renders**
+- "December 31" (no RTC) + clock + camera button + home-indicator gesture bar.
+Two cosmetic follow-ups: (1) colours are red-tinted - the iOS surface is BGRA
+but the gs101 splash buffer / panel is ARGB, so the present copy needs a
+channel swap (or set the IOSurface/fbcon format to match); white console text
+is correct because 0xffffffff is channel-order-agnostic. (2) leftover kernel
+console text bottom-left: add `sweetfb_noconsole=1` to stop drawing the
+console after the first iOS frame.
 
 **🎉🎉 MILESTONE 2026-10-21 02:00: iOS 16.7.16 USERLAND BOOTS ON THE PIXEL 6.**
 The real iPhone X 16.7.16 (20H392) root (built by tools/mkiosroot-macos.sh,
