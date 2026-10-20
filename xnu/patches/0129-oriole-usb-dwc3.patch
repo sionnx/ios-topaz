@@ -34,10 +34,13 @@ ADT sweet_ufs_init() calls it without sweethw=1. sweetusb=2 starts it.
  #include <kern/locks.h>
  #include <sys/kpi_mbuf.h>
  #include <sys/kpi_socket.h>
-@@ -70,6 +78,25 @@
+@@ -70,6 +78,28 @@
  	return v;
  }
  
++/* gs101 DWC_usb31 from the ADT: no Qualcomm wrapper (QSCRATCH) around it */
++static bool usb_oriole;
++
 +/* oriole: the DWC3 core from ADT /sweet-usb, or 0 when the node is absent. */
 +static vm_offset_t
 +sweet_usb_adt_dwc(void)
@@ -60,38 +63,30 @@ ADT sweet_ufs_init() calls it without sweethw=1. sweetusb=2 starts it.
  void
  sweet_usb_probe(void)
  {
-@@ -80,6 +107,17 @@
- 	/* sweetusb=0 off, 1 (default) report state only, 2 also start the USB device */
- 	PE_parse_boot_argn("sweetusb", &enabled, sizeof(enabled));
+@@ -82,6 +112,17 @@
  	if (!enabled) {
-+		return;
-+	}
+ 		return;
+ 	}
 +	vm_offset_t odwc = sweet_usb_adt_dwc();
 +	if (odwc != 0) {
-+		ud.oriole = true;
++		usb_oriole = true;
 +		printf("SWEET USB: gs101 DWC3 GSNPSID 0x%08x GCTL 0x%08x GUSB2PHYCFG 0x%08x DCTL 0x%08x DSTS 0x%08x\n",
 +		    usb_rd(odwc, 0xc120), usb_rd(odwc, 0xc110), usb_rd(odwc, 0xc200), usb_rd(odwc, 0xc704),
 +		    usb_rd(odwc, 0xc70c));
 +		if (enabled >= 2) {
 +			sweet_usb_gadget_start(odwc);
 +		}
- 		return;
- 	}
++		return;
++	}
  	vm_offset_t gcc = ml_io_map(GCC_PA, GCC_SIZE);
-@@ -217,6 +255,7 @@
- 
- static struct {
- 	vm_offset_t dwc;
-+	bool        oriole;         /* gs101 DWC_usb31 from the ADT, no Qualcomm wrapper */
- 	vm_offset_t dma;
- 	uint64_t    dma_pa;
- 	uint32_t    evt_pos;
-@@ -866,7 +905,7 @@
+ 	if (gcc == 0) {
+ 		printf("SWEET USB: GCC map failed\n");
+@@ -866,7 +907,7 @@
  	dwc_wr(DALEPENA, 0x3);
  	ud_start_setup();
  
 -	vm_offset_t qs = ml_io_map(QSCRATCH_PA, 0x100);
-+	vm_offset_t qs = ud.oriole ? 0 : ml_io_map(QSCRATCH_PA, 0x100);
++	vm_offset_t qs = usb_oriole ? 0 : ml_io_map(QSCRATCH_PA, 0x100);
  	if (qs != 0) {
  		uint32_t hs = usb_rd(qs, QSCRATCH_HS_PHY_CTRL), ss = usb_rd(qs, QSCRATCH_SS_PHY_CTRL);
  		printf("SWEET USB: QSCRATCH HS_PHY_CTRL 0x%08x SS_PHY_CTRL 0x%08x GENERAL_CFG 0x%08x\n",
