@@ -122,6 +122,25 @@ enabled, remote `fork`); MakrSas/ios-topaz is read-only for us.
 Not on this Mac: `research/ipsw-x/d22ap.adt` (iPhone X /product for the ADT),
 the iOS root image.
 
+**0129 built (CI 39428292845, `xnu/out-0129`, 2026-10-20 ~21:11): USB live
+log on the Pixel 6 DWC_usb31.** sweet_usb_probe takes the gs101 DWC3 from ADT
+/sweet-usb ("google,gs101-dwc3", reg 0x11110000) with no Qualcomm wrapper, and
+sweet_ufs_init calls it on a non-topaz ADT without sweethw=1. Image ready but
+UNTESTED on the phone: `oriole/shim/out/shim-boot.img` = 0129 + cmdline
+`... cpus=7 rd=ufsroot0 sweetusb=2`. Host reader: `oriole/usblog.sh` (needs
+`sudo ifconfig <if> inet 192.168.7.1 netmask 255.255.255.0` once; phone =
+192.168.7.2, log on udp/5140). Note the mount will still fail (userdata is
+Android's f2fs) - this run is only to confirm the CDC-ECM live log comes up on
+oriole, so a post-wipe boot has a log channel once Android is gone.
+
+**Aside: OnePlus 15 (SM8850 "canoe") ruled out (2026-10-20).** Evaluated as an
+alternative target. Bootloader really unlocked, `fastboot boot` of an unsigned
+EFI PE runs (UEFI firmware, entry at EL1). But ID_AA64MMFR0_EL1 =
+0x2100122100001024: TGran16 = 0 - the Oryon cores have NO 16K granule (4K and
+64K only). iOS needs 16K and XNU is 4K/16K only (64K is coarser and breaks the
+16K-aligned shared cache), so canoe cannot run the port. Probe in `canoe/probe/`
+(bare + UEFI EFI variants). Pixel 6 stays the target.
+
 **Step 3 in progress (2026-10-20 evening):**
 - **xnu 0127** (sionnx/ios-topaz CI 39414858118, `xnu/out-0127`): SCTLR SPAN
   (PAN fix), SweetCPU takes the ADT's MPIDRs, `PE_sweet_board_is_topaz()`
