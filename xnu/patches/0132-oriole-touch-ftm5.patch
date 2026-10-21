@@ -20,7 +20,7 @@ Boot-arg orioletouch=0 disables it, orioletouchdelay sets the start delay.
 ---
 --- /dev/null
 +++ b/bsd/dev/oriole_touch.c
-@@ -0,0 +1,470 @@
+@@ -0,0 +1,507 @@
 +/*
 + * oriole (Pixel 6 / gs101) ST FTM5 touch over Exynos USI-SPI11, with the two
 + * touch LDOs powered through ACPM. Mirrors the bare-metal bring-up validated
@@ -122,6 +122,7 @@ Boot-arg orioletouch=0 disables it, orioletouchdelay sets the start delay.
 +	bool acpm_ok, started, dead;
 +	uint8_t seqno;
 +	uint8_t active;                /* fingers currently down (bitmap) */
++	unsigned evt_dumped;           /* raw events logged for diagnosis */
 +	int diag;
 +	const char *stage;
 +} st;
@@ -364,6 +365,33 @@ Boot-arg orioletouch=0 disables it, orioletouchdelay sets the start delay.
 +	return 0;
 +}
 +
++/* SPI write: clock out cmd bytes (fts_write_internal: one transfer, no dummy). */
++static int
++ftm5_write(const uint8_t *cmd, uint32_t len)
++{
++	uint8_t rx[16];
++	if (len > sizeof(rx)) {
++		return -1;
++	}
++	cs_set(0);
++	int r = spi_xfer(cmd, rx, len);
++	cs_set(1);
++	return r;
++}
++
++/* setScanMode(SCAN_MODE_ACTIVE, 0xFF): start touch scanning. Without this the
++ * FTM5 powers up and reads its chip id but never produces touch events.
++ * (ftm5 vendor ftsCore.c setScanMode: a system command then the scan-mode
++ * command FTS_CMD_SCAN_MODE 0xA0, SCAN_MODE_ACTIVE 0x00, settings 0xFF.) */
++static void
++ftm5_sense_on(void)
++{
++	uint8_t cmd1[7] = { 0xFA, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00 };
++	uint8_t cmd2[3] = { 0xA0, 0x00, 0xFF };
++	ftm5_write(cmd1, 7);
++	ftm5_write(cmd2, 3);
++}
++
 +/* Power the FTM5 (ACPM LDOs) and release reset, vendor fts_chip_powercycle. */
 +static void
 +ftm5_bringup(void)
@@ -401,6 +429,11 @@ Boot-arg orioletouch=0 disables it, orioletouchdelay sets the start delay.
 +		uint8_t id = evt[0];
 +		if (id == 0x00) {
 +			return;                                      /* FIFO empty */
++		}
++		if (st.evt_dumped < 40) {
++			printf("ORIOLE TOUCH: evt %02x %02x %02x %02x %02x %02x %02x %02x\n",
++			    evt[0], evt[1], evt[2], evt[3], evt[4], evt[5], evt[6], evt[7]);
++			st.evt_dumped++;
 +		}
 +		if (id == FTM5_EVT_ENTER || id == FTM5_EVT_MOTION || id == FTM5_EVT_LEAVE) {
 +			int finger = (evt[1] >> 4) & 0xf;
@@ -455,6 +488,10 @@ Boot-arg orioletouch=0 disables it, orioletouchdelay sets the start delay.
 +		printf("ORIOLE TOUCH: chip id mismatch; stopping\n");
 +		goto out;
 +	}
++
++	st.stage = "sense on";
++	ftm5_sense_on();
++	printf("ORIOLE TOUCH: scan mode active (sensing on)\n");
 +
 +	st.stage = "polling";
 +	printf("ORIOLE TOUCH: FTM5 up, 1080x2400, poll 10 ms\n");
