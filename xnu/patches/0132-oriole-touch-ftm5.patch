@@ -1,0 +1,521 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sion <claude-0925@reao.io>
+Date: Tue, 21 Oct 2026 11:45:00 +0800
+Subject: [PATCH] oriole-0132: FTM5 touch on SPI11 + ACPM-powered LDOs
+
+New bsd/dev/oriole_touch.c: the ST FTM5 touchscreen on the Pixel 6, driven
+over Exynos USI-SPI11 with its two LDOs powered through ACPM. Mirrors the
+bare-metal bring-up validated in oriole/shim/{spi,acpm}.c (FTM5 chip id 0x3648
+read on device):
+  CMU_PERIC1 clock -> USI SPI mode -> gpp23 pinmux + CS_AUTO -> ACPM IPC to
+  enable S2MPG10 LDO25 (DVDD 1.8V) / LDO26 (AVDD 2.8V) -> gpp26-0 reset ->
+  poll the FTM5 event FIFO (cmd 0x87, 8-byte events) -> sweet_hid_touch.
+The ACPM client posts S2MPG10 register reads/updates like the Linux acpm_mfd
+driver (ring pointers parsed from the live framework in APM SRAM). Coordinates
+0-1079/0-2399 pass straight to sweet_hid_touch (SweetHID maps to 1125x2436).
+
+Gated to oriole: called from sweet_ufs' non-topaz branch (like sweet_usb_probe)
+and returns early on a topaz ADT. topaz keeps sweet_touch.c (FocalTech/GENI).
+Boot-arg orioletouch=0 disables it, orioletouchdelay sets the start delay.
+---
+--- /dev/null
++++ b/bsd/dev/oriole_touch.c
+@@ -0,0 +1,470 @@
++/*
++ * oriole (Pixel 6 / gs101) ST FTM5 touch over Exynos USI-SPI11, with the two
++ * touch LDOs powered through ACPM. Mirrors the bare-metal bring-up validated
++ * in oriole/shim/{spi,acpm}.c (chip id 0x3648 read on device 2026-10-21):
++ *   CMU_PERIC1 clock -> USI SPI mode -> gpp23 pinmux + CS_AUTO -> ACPM IPC to
++ *   enable S2MPG10 LDO25 (DVDD) / LDO26 (AVDD) -> gpp26-0 reset -> poll the
++ *   FTM5 event FIFO (cmd 0x87, 8-byte events) -> sweet_hid_touch.
++ * Gated to oriole; topaz keeps its own sweet_touch.c (FocalTech on GENI I2C).
++ * Call once after the scheduler is running; all work runs on one thread.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t thread_terminate(thread_t);
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++extern int PE_sweet_board_is_topaz(void);       /* pexpert/arm/pe_init.c */
++void oriole_touch_init(void);
++
++/* ---- physical bases (live Pixel 6 DT; see oriole/TOUCH.md) ---- */
++#define SPI_PA          0x10D40000u    /* samsung,exynos-spi spi11 */
++#define CMU_PA          0x10C00000u    /* CMU_PERIC1 */
++#define SYSREG_PA       0x10C20000u    /* sysreg_peric1 (USI SW_CONF +0x100C) */
++#define PINCTRL_PA      0x10C40000u    /* google,gs101-pinctrl PERIC1 */
++#define MBOX_PA         0x17610000u    /* ACPM mailbox (doorbell +0x40) */
++#define APMSRAM_PA      0x02039000u    /* APM SRAM (256 KiB) */
++#define APMSRAM_SIZE    0x40000u
++
++/* ---- Exynos SPI registers (off from SPI base) ---- */
++#define CH_CFG          0x00u
++#define MODE_CFG        0x08u
++#define SLAVE_SEL       0x0Cu
++#define INT_EN          0x10u
++#define SPI_STATUS      0x14u
++#define TX_DATA         0x18u
++#define RX_DATA         0x1Cu
++#define PACKET_CNT      0x20u
++#define PENDING_CLR     0x24u
++#define SWAP_CFG        0x28u
++#define FB_CLK          0x2Cu
++#define USI_CON         0xC4u
++#define USI_OPTION      0xC8u
++#define CH_SW_RST       (1u << 5)
++#define CH_RXCH_ON      (1u << 1)
++#define CH_TXCH_ON      (1u << 0)
++#define SS_CS_AUTO      (1u << 1)
++#define SS_NSC_CNT_2    (2u << 4)
++#define PKT_EN          (1u << 16)
++#define USI_OPT_CLKREQ_ON  (1u << 1)
++#define USI_OPT_CLKSTOP_ON (1u << 2)
++
++/* ---- CMU_PERIC1 (off from CMU base): spi11/usi11 clock ---- */
++#define CMU_MUX_USI11   0x0640u        /* bit4: 0=oscclk(24M) */
++#define CMU_DIV_USI11   0x180Cu        /* bits[3:0]=divider-1 */
++#define CMU_GATE_IPCLK4 0x202Cu        /* bit21 */
++#define CMU_GATE_PCLK4  0x204Cu        /* bit21 */
++#define CMU_GATE_USI11  0x2068u        /* bit21 */
++#define CMU_GATE_BIT    (1u << 21)
++
++/* ---- USI SW_CONF (off from SYSREG base) ---- */
++#define USI_SW_CONF     0x100Cu        /* bits[2:0]=2 selects SPI */
++
++/* ---- pinctrl (off from PINCTRL base) ---- */
++#define GPP23_OFF       0x60u          /* CLK/MOSI/MISO = pin0/1/2 func2, CS=pin3 */
++#define GPP26_OFF       0xC0u          /* reset = pin0, active low */
++
++/* ---- ACPM IPC ---- */
++#define ACPM_FW_OFF     0xA000u        /* framework at APMSRAM + 0xA000 */
++#define APM_INTGR       0x40u          /* doorbell */
++#define MFD_CH          2u
++#define IPC_CH_SIZE     0x48u
++#define PMIC_TYPE       0x01u
++#define FUNC_READ       0u
++#define FUNC_UPDATE     2u
++
++/* ---- S2MPG10 touch LDOs ---- */
++#define LDO25_CTRL      0x5Cu          /* DVDD: vsel 0x2C=1.8V, enable bit7 */
++#define LDO26_CTRL      0x5Du          /* AVDD: vsel 0x28=2.8V, enable bit7 */
++
++/* ---- FTM5 ---- */
++#define FTM5_HW_REG_R   0xFBu
++#define FTM5_FIFO_READ  0x87u
++#define FTM5_CHIP_ADDR  0x20000000u
++#define FTM5_EVT_ENTER  0x13u
++#define FTM5_EVT_MOTION 0x23u
++#define FTM5_EVT_LEAVE  0x33u
++
++static struct {
++	vm_offset_t spi, cmu, sysreg, pinctrl, mbox, apmsram;
++	/* ACPM ring (parsed at runtime from the framework in APM SRAM) */
++	vm_offset_t rx_front_a, rx_rear_a, tx_front_a, tx_rear_a;
++	uint32_t rx_base, tx_base, q_len, q_esz;
++	bool acpm_ok, started, dead;
++	uint8_t seqno;
++	uint8_t active;                /* fingers currently down (bitmap) */
++	int diag;
++	const char *stage;
++} st;
++static int otouch_sleep_chan;
++
++static uint32_t
++rd(vm_offset_t a)
++{
++	uint32_t v = *(volatile uint32_t *)a;
++	__asm__ volatile("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++wr(vm_offset_t a, uint32_t v)
++{
++	__asm__ volatile("dmb oshst" ::: "memory");
++	*(volatile uint32_t *)a = v;
++	__asm__ volatile("dsb osh" ::: "memory");
++}
++
++static void
++otouch_wait(unsigned ms)
++{
++	uint64_t deadline;
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&otouch_sleep_chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++/* ---- ACPM IPC (see oriole/shim/acpm.c) ---- */
++static void
++acpm_init(void)
++{
++	uint32_t ipc_channels = rd(st.apmsram + ACPM_FW_OFF + 0x08);
++	vm_offset_t ch = st.apmsram + ipc_channels + MFD_CH * IPC_CH_SIZE;
++	/* rear/front hold a POINTER (SRAM offset to the index), base is the data
++	 * ring's SRAM offset. AP sends on the rx_* ring, receives on tx_*. */
++	st.rx_rear_a  = st.apmsram + rd(ch + 0x10);
++	st.rx_front_a = st.apmsram + rd(ch + 0x14);
++	st.rx_base    = rd(ch + 0x18);
++	st.tx_rear_a  = st.apmsram + rd(ch + 0x28);
++	st.tx_front_a = st.apmsram + rd(ch + 0x2C);
++	st.tx_base    = rd(ch + 0x30);
++	st.q_len      = rd(ch + 0x34);
++	st.q_esz      = rd(ch + 0x38);
++	st.acpm_ok = (st.rx_base < APMSRAM_SIZE && st.tx_base < APMSRAM_SIZE &&
++	    st.q_len >= 1 && st.q_len <= 64 && st.q_esz >= 16 && st.q_esz <= 64);
++	printf("ORIOLE TOUCH: ACPM ch2 rx_base %#x tx_base %#x qlen %u qesz %u ok=%d\n",
++	    st.rx_base, st.tx_base, st.q_len, st.q_esz, st.acpm_ok);
++}
++
++static int
++acpm_cmd(uint32_t c0, uint32_t c1, uint32_t *resp)
++{
++	if (!st.acpm_ok) {
++		return -1;
++	}
++	uint8_t s = st.seqno++ & 0x3f;
++	if (st.seqno == 0) {
++		st.seqno = 1;
++	}
++	c0 |= (uint32_t)s << 16;
++
++	uint32_t front = rd(st.rx_front_a);
++	vm_offset_t slot = st.apmsram + st.rx_base + st.q_esz * front;
++	wr(slot + 0, c0);
++	wr(slot + 4, c1);
++	wr(slot + 8, 0);
++	wr(slot + 12, 0);
++	for (uint32_t o = 16; o < st.q_esz; o += 4) {
++		wr(slot + o, 0);
++	}
++	wr(st.rx_front_a, (front + 1) % st.q_len);
++	wr(st.mbox + APM_INTGR, 1u << MFD_CH);
++
++	for (unsigned t = 0; t < 200000; t++) {      /* ~200 ms */
++		uint32_t tf = rd(st.tx_front_a);
++		uint32_t tr = rd(st.tx_rear_a);
++		if (tf != tr) {
++			vm_offset_t tslot = st.apmsram + st.tx_base + st.q_esz * tr;
++			uint32_t r0 = rd(tslot), r1 = rd(tslot + 4);
++			wr(st.tx_rear_a, (tr + 1) % st.q_len);
++			if (((r0 >> 16) & 0x3f) == s) {
++				if (resp) {
++					*resp = r1;
++				}
++				return 0;
++			}
++		}
++		delay(1);
++	}
++	return -1;
++}
++
++static int
++acpm_pmic_update(uint8_t reg, uint8_t val, uint8_t mask)
++{
++	uint32_t c0 = (PMIC_TYPE << 8) | reg;
++	uint32_t c1 = FUNC_UPDATE | ((uint32_t)val << 8) | ((uint32_t)mask << 16);
++	uint32_t r = 0;
++	int rc = acpm_cmd(c0, c1, &r);
++	if (rc || ((r >> 24) & 0xff)) {
++		printf("ORIOLE TOUCH: ACPM update %#x=%#x/%#x rc %d status %#x\n",
++		    reg, val, mask, rc, (r >> 24) & 0xff);
++	}
++	return rc;
++}
++
++/* ---- SPI11 bring-up (see oriole/shim/spi.c) ---- */
++static void
++cmu_clk_enable(void)
++{
++	/* oscclk (24 MHz) /4 -> 6 MHz SCLK; enable ipclk+pclk+usi gates. */
++	wr(st.cmu + CMU_MUX_USI11, rd(st.cmu + CMU_MUX_USI11) & ~(1u << 4));
++	wr(st.cmu + CMU_DIV_USI11, (rd(st.cmu + CMU_DIV_USI11) & ~0xfu) | 3);
++	wr(st.cmu + CMU_GATE_IPCLK4, rd(st.cmu + CMU_GATE_IPCLK4) | CMU_GATE_BIT);
++	wr(st.cmu + CMU_GATE_PCLK4, rd(st.cmu + CMU_GATE_PCLK4) | CMU_GATE_BIT);
++	wr(st.cmu + CMU_GATE_USI11, rd(st.cmu + CMU_GATE_USI11) | CMU_GATE_BIT);
++	delay(100);
++}
++
++static void
++spi_pinmux(void)
++{
++	/* gpp23-0/1/2 = SPI func2 (CLK/MOSI/MISO); gpp23-3 CS driven by cs_set. */
++	vm_offset_t con = st.pinctrl + GPP23_OFF;
++	uint32_t c = rd(con);
++	c &= ~((0xfu << 0) | (0xfu << 4) | (0xfu << 8));
++	c |= (2u << 0) | (2u << 4) | (2u << 8);
++	wr(con, c);
++}
++
++static void
++spi_hwinit(void)
++{
++	cmu_clk_enable();
++	spi_pinmux();
++	uint32_t c = rd(st.sysreg + USI_SW_CONF);
++	wr(st.sysreg + USI_SW_CONF, (c & ~0x7u) | 0x2u);        /* SPI */
++	wr(st.spi + USI_CON, 0);                               /* clear reset */
++	wr(st.spi + USI_OPTION, (rd(st.spi + USI_OPTION) | USI_OPT_CLKREQ_ON) & ~USI_OPT_CLKSTOP_ON);
++	wr(st.spi + CH_CFG, CH_SW_RST);
++	delay(10);
++	wr(st.spi + CH_CFG, 0);                                /* master, mode 0 */
++	wr(st.spi + SLAVE_SEL, SS_CS_AUTO | SS_NSC_CNT_2);     /* auto CS */
++	wr(st.spi + INT_EN, 0);
++	wr(st.spi + MODE_CFG, 0);                              /* byte transfers */
++	wr(st.spi + SWAP_CFG, 0);
++	wr(st.spi + FB_CLK, 1);
++	wr(st.spi + PACKET_CNT, 0);
++	wr(st.spi + PENDING_CLR, 0x1f);
++}
++
++/* CS = gpp23 pin3 (software GPIO output, active low). */
++static void
++cs_set(int high)
++{
++	vm_offset_t con = st.pinctrl + GPP23_OFF;
++	vm_offset_t dat = st.pinctrl + GPP23_OFF + 4;
++	uint32_t c = rd(con);
++	c &= ~(0xfu << (3 * 4));
++	c |= (1u << (3 * 4));
++	wr(con, c);
++	uint32_t d = rd(dat);
++	if (high) {
++		d |= (1u << 3);
++	} else {
++		d &= ~(1u << 3);
++	}
++	wr(dat, d);
++}
++
++static int
++spi_xfer(const uint8_t *tx, uint8_t *rx, uint32_t len)
++{
++	wr(st.spi + PACKET_CNT, 0);
++	wr(st.spi + PACKET_CNT, PKT_EN | (len & 0xffff));
++	for (uint32_t i = 0; i < len; i++) {
++		wr(st.spi + TX_DATA, tx ? tx[i] : 0);
++	}
++	wr(st.spi + CH_CFG, CH_RXCH_ON | CH_TXCH_ON);
++	int ok = 0;
++	for (unsigned t = 0; t < 100000; t++) {               /* ~100 ms */
++		if (((rd(st.spi + SPI_STATUS) >> 15) & 0x1ff) >= len) {
++			ok = 1;
++			break;
++		}
++		delay(1);
++	}
++	if (!ok) {
++		wr(st.spi + CH_CFG, 0);
++		return -1;
++	}
++	for (uint32_t i = 0; i < len; i++) {
++		rx[i] = (uint8_t)rd(st.spi + RX_DATA);
++	}
++	wr(st.spi + CH_CFG, 0);
++	return 0;
++}
++
++/* FTS_CMD_HW_REG_R (0xFB) + 4-byte big-endian addr, 1 dummy, then toRead. */
++static int
++ftm5_hwreg_read(uint32_t addr, uint8_t *buf, uint32_t toRead)
++{
++	uint8_t tx[8] = { FTM5_HW_REG_R, (uint8_t)(addr >> 24), (uint8_t)(addr >> 16),
++		          (uint8_t)(addr >> 8), (uint8_t)addr };
++	uint8_t rx[16] = { 0 };
++	uint32_t n = 5 + 1 + toRead;
++	if (n > sizeof(rx)) {
++		return -1;
++	}
++	cs_set(0);
++	int r = spi_xfer(tx, rx, n);
++	cs_set(1);
++	if (r) {
++		return r;
++	}
++	for (uint32_t i = 0; i < toRead; i++) {
++		buf[i] = rx[5 + 1 + i];
++	}
++	return 0;
++}
++
++/* FIFO_CMD_READALL (0x87), no address, 1 dummy, 8 event bytes. */
++static int
++ftm5_fifo_read(uint8_t *evt)
++{
++	uint8_t tx[1] = { FTM5_FIFO_READ };
++	uint8_t rx[16] = { 0 };
++	cs_set(0);
++	int r = spi_xfer(tx, rx, 1 + 1 + 8);
++	cs_set(1);
++	if (r) {
++		return r;
++	}
++	for (int i = 0; i < 8; i++) {
++		evt[i] = rx[1 + 1 + i];
++	}
++	return 0;
++}
++
++/* Power the FTM5 (ACPM LDOs) and release reset, vendor fts_chip_powercycle. */
++static void
++ftm5_bringup(void)
++{
++	vm_offset_t rcon = st.pinctrl + GPP26_OFF;
++	vm_offset_t rdat = st.pinctrl + GPP26_OFF + 4;
++	uint32_t c = rd(rcon);
++	c &= ~(0xfu << 0);
++	c |= (1u << 0);                                        /* gpp26-0 output */
++	wr(rcon, c);
++	wr(rdat, rd(rdat) & ~1u);                             /* assert reset low */
++
++	acpm_init();
++	acpm_pmic_update(LDO25_CTRL, 0x2C, 0x3F);             /* DVDD 1.8V */
++	acpm_pmic_update(LDO25_CTRL, 0x80, 0x80);             /* DVDD enable */
++	otouch_wait(1);                                       /* digital before analog */
++	acpm_pmic_update(LDO26_CTRL, 0x28, 0x3F);             /* AVDD 2.8V */
++	acpm_pmic_update(LDO26_CTRL, 0x80, 0x80);             /* AVDD enable */
++	otouch_wait(5);                                       /* regulators settle */
++
++	otouch_wait(10);                                      /* hold reset */
++	wr(rdat, rd(rdat) | 1u);                              /* release reset */
++	otouch_wait(60);                                      /* firmware boot */
++}
++
++/* Read and dispatch pending FTM5 events to sweet_hid_touch. */
++static void
++ftm5_poll(void)
++{
++	uint8_t evt[8];
++	for (int i = 0; i < 32; i++) {                        /* drain the FIFO */
++		if (ftm5_fifo_read(evt) != 0) {
++			return;
++		}
++		uint8_t id = evt[0];
++		if (id == 0x00) {
++			return;                                      /* FIFO empty */
++		}
++		if (id == FTM5_EVT_ENTER || id == FTM5_EVT_MOTION || id == FTM5_EVT_LEAVE) {
++			int finger = (evt[1] >> 4) & 0xf;
++			int x = ((evt[3] & 0x0F) << 8) | evt[2];
++			int y = (evt[4] << 4) | ((evt[3] & 0xF0) >> 4);
++			if (finger >= 10) {
++				continue;
++			}
++			if (id == FTM5_EVT_LEAVE) {
++				sweet_hid_touch(finger, 0, x, y);
++				st.active &= ~(1u << finger);
++			} else {
++				sweet_hid_touch(finger, 1, x, y);
++				st.active |= (1u << finger);
++			}
++		}
++	}
++}
++
++static void
++otouch_thread(void *arg, wait_result_t result)
++{
++	unsigned delay_s = 45;
++	(void)arg;
++	(void)result;
++	(void)PE_parse_boot_argn("orioletouchdelay", &delay_s, sizeof(delay_s));
++	printf("ORIOLE TOUCH: starting in %u s\n", delay_s);
++	otouch_wait(delay_s * 1000u);
++
++	st.stage = "map";
++	st.spi = ml_io_map(SPI_PA, 0x1000);
++	st.cmu = ml_io_map(CMU_PA, 0x4000);
++	st.sysreg = ml_io_map(SYSREG_PA, 0x2000);
++	st.pinctrl = ml_io_map(PINCTRL_PA, 0x1000);
++	st.mbox = ml_io_map(MBOX_PA, 0x1000);
++	st.apmsram = ml_io_map(APMSRAM_PA, APMSRAM_SIZE);
++	if (!st.spi || !st.cmu || !st.sysreg || !st.pinctrl || !st.mbox || !st.apmsram) {
++		printf("ORIOLE TOUCH: MMIO mapping failed\n");
++		goto out;
++	}
++
++	st.stage = "spi hwinit";
++	spi_hwinit();
++	st.stage = "power+reset";
++	ftm5_bringup();
++
++	st.stage = "probe";
++	uint8_t idb[2] = { 0, 0 };
++	(void)ftm5_hwreg_read(FTM5_CHIP_ADDR, idb, 2);
++	printf("ORIOLE TOUCH: FTM5 chip id %02x %02x (expect 36 48)\n", idb[0], idb[1]);
++	if (idb[0] != 0x36 || idb[1] != 0x48) {
++		printf("ORIOLE TOUCH: chip id mismatch; stopping\n");
++		goto out;
++	}
++
++	st.stage = "polling";
++	printf("ORIOLE TOUCH: FTM5 up, 1080x2400, poll 10 ms\n");
++	while (!st.dead) {
++		ftm5_poll();
++		otouch_wait(10);
++	}
++out:
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++void
++oriole_touch_init(void)
++{
++	int enabled = 1;
++	thread_t thread;
++	if (st.started || PE_sweet_board_is_topaz()) {
++		return;
++	}
++	st.started = true;
++	st.seqno = 1;
++	(void)PE_parse_boot_argn("orioletouch", &enabled, sizeof(enabled));
++	(void)PE_parse_boot_argn("orioletouchdiag", &st.diag, sizeof(st.diag));
++	if (!enabled) {
++		printf("ORIOLE TOUCH: disabled (orioletouch=0)\n");
++		return;
++	}
++	kern_return_t kr = kernel_thread_start(otouch_thread, NULL, &thread);
++	if (kr == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		printf("ORIOLE TOUCH: kernel_thread_start failed %d\n", kr);
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -51,6 +51,7 @@
+ static void sweet_log_start(void);
+ extern void sweet_sample_start(void);
+ extern void sweet_keys_init(void);
++extern void oriole_touch_init(void);       /* bsd/dev/oriole_touch.c */
+ extern void sweet_touch_init(void);
+ extern void sweet_usb_probe(void);
+ extern int PE_sweet_board_is_topaz(void);       /* pexpert/arm/pe_init.c */
+@@ -922,6 +923,7 @@
+ 		sweet_keys_init();
+ 	} else {
+ 		printf("SWEET UFS: topaz touch/keys skipped (not a topaz ADT)\n");
++		oriole_touch_init();        /* oriole: FTM5 on SPI11, ACPM-powered */
+ 	}
+ 	/* oriole: sweet_usb_probe() takes the gs101 DWC3 from the ADT (no SM7150 MMIO) */
+ 	if (hw == 1 || !PE_sweet_board_is_topaz()) {
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -108,6 +108,7 @@
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/sweet_touch.c			standard
++bsd/dev/oriole_touch.c			standard
+ bsd/dev/sweet_i2c1.c			standard
+ bsd/dev/sweet_cpufreq.c			standard
+ bsd/dev/sweet_rpmh.c			standard

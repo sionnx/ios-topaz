@@ -95,6 +95,18 @@ system into recovery; (2) both LDOs default OFF (bit7=0: 0x5C was 0x2C, 0x5D
 (same SPI11 + ACPM bring-up, reset, poll the event FIFO cmd 0x87 / 8-byte events
 -> sweet_hid_touch, gated to oriole) so SpringBoard gets touch on the Pixel 6.
 
+**Kernel driver written: patch 0132 `bsd/dev/oriole_touch.c` (2026-10-21).** Port
+of the shim-verified bring-up into xnu: ml_io_map the six blocks (SPI11, CMU,
+SYSREG, pinctrl, ACPM mailbox, APM SRAM), one kernel thread does SPI hwinit +
+ACPM LDO enable + gpp26 reset + chip-id check, then polls the event FIFO (cmd
+0x87, 8-byte events: 0x13 ENTER / 0x23 MOTION / 0x33 LEAVE,
+x=((e3&0xF)<<8)|e2, y=(e4<<4)|((e3&0xF0)>>4)) -> sweet_hid_touch. Gated to oriole
+(sweet_ufs' non-topaz branch calls oriole_touch_init; returns early on a topaz
+ADT). Boot-args orioletouch=0 / orioletouchdelay. Host-stub syntax check clean,
+patch applies to the 0131 tree with MATCH. NOT yet CI-built or on-device. NEXT:
+push -> CI kernel build -> build shim-boot (kernel + oriole ADT + payload) ->
+on-device test (swipe to unlock, tap).
+
 
 
 Goal: move the topaz port to a Google Pixel 6 (`oriole`, Tensor gs101: 4x A55 +
