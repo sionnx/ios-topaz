@@ -438,6 +438,18 @@ AppleParavirtGPU.kext + AppleParavirtGPUMetalIOGPUFamily.bundle send Metal
   no iOS 26 guest). Ace 5 Ultra fits on paper (X925/X4/A720: PAC + 16K,
   Vulkan 1.3+ Mali blob); unknown: whether root can create non-protected VMs
   (/dev/gzvm or /dev/kvm), and Vulkan feature coverage on G925.
+- Bare-metal variant (no VM, discussed 2026-10-21): keep Apple's PV Metal
+  bundle, replace the hypervisor with our own XNU pieces: a kext that plays the
+  AppleParavirtGPU device and hands the ring to an on-device backend (reims
+  decoder + metal2vulkan) -> Mesa PanVK ported to Darwin (pan_kmod backend for
+  our kext) -> an XNU port of Panthor (CSF) + MTK GPUEB power. Helpful prior
+  art: Panthor MT8196 (= G925) support in drm-misc-next Oct 2025 (ASN hash),
+  Collabora's ~800-line GPUEB driver, Mesa 25.1 PanVK v12/v13,
+  theycallmeboxy/panvk-kbase-android (PanVK over Android mali_kbase, G925 v13
+  reported passing). Still iOS 26 only (PV bundle) -> PAC -> Ace 5 Ultra; Pixel
+  6 G78 is Valhall v9 JM, which PanVK does not cover. Route-independent
+  de-risk: (1) iOS 26 vphone guest + reims on a Mac, (2) metal2vulkan + PanVK
+  or the Mali blob on the phone under Android.
 
 **Step 3 in progress (2026-10-20 evening):**
 - **xnu 0127** (sionnx/ios-topaz CI 39414858118, `xnu/out-0127`): SCTLR SPAN
