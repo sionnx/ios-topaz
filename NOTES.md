@@ -107,6 +107,39 @@ patch applies to the 0131 tree with MATCH. NOT yet CI-built or on-device. NEXT:
 push -> CI kernel build -> build shim-boot (kernel + oriole ADT + payload) ->
 on-device test (swipe to unlock, tap).
 
+**On-device run 1 (2026-10-21, image shim-boot-0132e.img, orioletouchdelay=90):
+kernel driver bring-up WORKS, but touch was unresponsive.** USB live log:
+`ORIOLE TOUCH: ACPM ch2 ... qlen 5 qesz 16 ok=1`, `FTM5 chip id 36 48`, `FTM5
+up, poll 10 ms`. So ACPM/SPI/LDO/reset all work in-kernel (chip id read),
+polling runs - but no touch events reach SpringBoard. Cause: the driver read
+the chip id and polled the FIFO without turning on scanning. FTM5 powers up
+idle; it needs **setScanMode(SCAN_MODE_ACTIVE, 0xFF)** to scan the panel and
+produce events (vendor ftsCore.c: write 0xFA 0x20 00 00 00 00 00 then 0xA0 0x00
+0xFF). Added ftm5_sense_on after the chip-id check + log the first 40 raw FIFO
+events (patch 0132 updated, CI rebuild run 39544510815). Note on logs: the USB
+live log only streams after sweet_usb comes up (~60 s), so set orioletouchdelay
+past that (90 s) to catch the touch bring-up log live; earlier it got pushed out
+of the 64 KiB console ring. en16 needs `sudo ifconfig en16 inet 192.168.7.1
+netmask 255.255.255.0` each boot (USB re-enumerates), then `oriole/usblog.sh`.
+
+**🎉🎉🎉 TOUCH WORKS ON THE PIXEL 6 (2026-10-21, image shim-boot-0132f.img).**
+With ftm5_sense_on added, the FTM5 produces events and iOS responds: the user
+**unlocked and operated the iOS 16 home screen** (Photos/App Store/Settings,
+Dock, taps all work, video IMG_4348.MOV). Log: `scan mode active (sensing on)`
+then a stream of `evt 13/23/33` (ENTER/MOTION/LEAVE) with sane coords (e.g.
+ENTER x=551 y=2357 at the bottom edge, y decreasing = swipe up). The whole
+touch stack is proven end to end on the Pixel 6: SPI11 + CMU + pinmux + CS +
+ACPM->S2MPG10 LDO + gpp26 reset + chip id + **setScanMode active** + event FIFO
+poll -> sweet_hid_touch -> SpringBoard. **Remaining issue is UI lag, and it is
+the no-GPU limit, NOT touch**: the display is CPU-composited (AppleCLCD ->
+fPixels, shim CPU0 scanout), CoreAnimation runs on the CPU, widgets stay
+"Waiting...". A real GPU is out of reach (Pixel 6 Mali-G78 vs Apple AGX; iOS's
+AGXAccelerator can't drive Mali). Touch events themselves are smooth (60 Hz, no
+delay). Speed tweak for touch latency (not lag): SCLK 6 MHz (CMU div /1) +
+batch-read 8 events per 0x87 transfer + orioletouchdiag-gated event logging
+(CI run 39547142815). orioletouchdelay must stay > ~60 s so the USB live log
+catches the bring-up; en16 needs sudo ifconfig 192.168.7.1 each boot.
+
 
 
 Goal: move the topaz port to a Google Pixel 6 (`oriole`, Tensor gs101: 4x A55 +
@@ -375,6 +408,36 @@ idmgr-*, lks, ...). Xiaomi unlock = Mi Unlock token, gated by community quiz. To
 oplus-ota-url.sh (OTA query + downloadCheck resolve), rpayload.py (one
 partition from a remote OTA zip by HTTP range), lkcmds.py + lktable.py
 (fastboot commands in an MTK lk.img). Downloads stay outside git.
+
+**Aside: GPU research (2026-10-21, desk only, nothing built).** Ace 5 Ultra's
+GPU is Immortalis-G925 MC12 = still Arm Mali (Valhall 5th gen, CSF), so a
+native AGX path is as dead there as on the Pixel 6 (G78). The one GPU route
+the community has shown is Apple's **paravirtual GPU**: the guest's
+AppleParavirtGPU.kext + AppleParavirtGPUMetalIOGPUFamily.bundle send Metal
+(AIR shaders + command stream) to a host. Observed by others, not by us:
+- iOS 26 has it: wh1te4ever/super-tart-vphone-writeup boots iOS 26.1 on the
+  PCC research platform (vresearch101ap/vphone600ap, kernelcache.research.
+  vphone600, Darwin 25.1) under Virtualization.framework; ioreg shows
+  AppleParavirtGPU; MTLCreateSystemDefaultDevice works after copying the
+  bundle from a PCC VM (+ a reimplemented libAppleParavirtCompilerPlugin
+  IOGPUFamily.dylib). Lakr233/vphone-cli: no PV GPU on iOS 18.x guests, so
+  iOS 16/18 cannot use this route.
+- Open host side exists: steelbrain-bot/reims-vgpu (LGPL-3, alpha, 2026-07)
+  = QEMU device for AppleParavirtGPU, decodes the guest command stream and
+  runs it on Vulkan via steelbrain/metal2vulkan (AIR -> SPIR-V + Metal API on
+  Vulkan >= 1.2, beta). Shown: macOS 13 guests (x86 on Linux/NVIDIA, arm64 on
+  Apple Silicon, and steelbrain/experiment-macOS-arm64-on-asahi-linux-arm64 =
+  vmapple under KVM on Asahi, rendered with llvmpipe). No iOS guest, no Mali,
+  no phone yet. The KVM port needed Apple PAC VM-key/APCTL/KERNKEY state and
+  Apple's private PAuth HVC service implemented in QEMU.
+- Implied architecture (hypothesis): Android/Linux host keeps all phone drivers,
+  iOS 26 vphone600ap runs as a guest with Apple PV devices, GPU = reims-vgpu ->
+  metal2vulkan -> the phone's Mali Vulkan driver. Needs a guest-usable
+  hypervisor (MTK GenieZone/gzvm or KVM at EL2), PAC + 16K on the CPU, and a
+  vresearch/vphone machine model incl. SEP. Pixel 6 is out for it (no PAC ->
+  no iOS 26 guest). Ace 5 Ultra fits on paper (X925/X4/A720: PAC + 16K,
+  Vulkan 1.3+ Mali blob); unknown: whether root can create non-protected VMs
+  (/dev/gzvm or /dev/kvm), and Vulkan feature coverage on G925.
 
 **Step 3 in progress (2026-10-20 evening):**
 - **xnu 0127** (sionnx/ios-topaz CI 39414858118, `xnu/out-0127`): SCTLR SPAN
