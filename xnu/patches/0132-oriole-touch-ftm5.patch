@@ -20,7 +20,7 @@ Boot-arg orioletouch=0 disables it, orioletouchdelay sets the start delay.
 ---
 --- /dev/null
 +++ b/bsd/dev/oriole_touch.c
-@@ -0,0 +1,510 @@
+@@ -0,0 +1,512 @@
 +/*
 + * oriole (Pixel 6 / gs101) ST FTM5 touch over Exynos USI-SPI11, with the two
 + * touch LDOs powered through ACPM. Mirrors the bare-metal bring-up validated
@@ -348,20 +348,22 @@ Boot-arg orioletouch=0 disables it, orioletouchdelay sets the start delay.
 +	return 0;
 +}
 +
-+/* FIFO_CMD_READALL (0x87) clocks out consecutive 8-byte events. Read up to 8
-+ * in one SPI transfer (1 cmd + 1 dummy + 8*8 data) to cut per-event overhead. */
++/* FIFO_CMD_READALL (0x87) clocks out consecutive 8-byte events. Read up to 7
++ * in one SPI transfer (1 cmd + 1 dummy + 7*8 = 58 bytes); the Exynos RX FIFO is
++ * 64 deep, so a single polled transfer must stay <= 64 bytes. */
++#define FIFO_EVENTS     7
 +static int
 +ftm5_fifo_read(uint8_t *buf)
 +{
 +	uint8_t tx[1] = { FTM5_FIFO_READ };
-+	uint8_t rx[2 + 8 * 8] = { 0 };
++	uint8_t rx[2 + FIFO_EVENTS * 8] = { 0 };
 +	cs_set(0);
 +	int r = spi_xfer(tx, rx, sizeof(rx));
 +	cs_set(1);
 +	if (r) {
 +		return r;
 +	}
-+	for (int i = 0; i < 8 * 8; i++) {
++	for (int i = 0; i < FIFO_EVENTS * 8; i++) {
 +		buf[i] = rx[2 + i];
 +	}
 +	return 0;
@@ -423,11 +425,11 @@ Boot-arg orioletouch=0 disables it, orioletouchdelay sets the start delay.
 +static void
 +ftm5_poll(void)
 +{
-+	uint8_t buf[8 * 8];
++	uint8_t buf[FIFO_EVENTS * 8];
 +	if (ftm5_fifo_read(buf) != 0) {
 +		return;
 +	}
-+	for (int e = 0; e < 8; e++) {                         /* up to 8 events / read */
++	for (int e = 0; e < FIFO_EVENTS; e++) {               /* events per read */
 +		uint8_t *evt = buf + e * 8;
 +		uint8_t id = evt[0];
 +		if (id == 0x00) {
