@@ -63,14 +63,15 @@ void acpm_init(void)
 		out("  ch2+%x: %x %x %x %x\n", i, rd32(ch_desc + i), rd32(ch_desc + i + 4),
 		    rd32(ch_desc + i + 8), rd32(ch_desc + i + 12));
 
-	/* channel_info starts at ipc_channel+0x10 and rx_rear is its first field,
-	 * so these offsets are relative to ch_desc directly (the only reading that
-	 * keeps q_esz at +0x38 inside the 0x48-byte ipc_channel). Verify vs dump. */
-	rx_rear_a  = ch_desc + 0x10;
-	rx_front_a = ch_desc + 0x14;
+	/* channel_info at ch_desc+0x10. The rear/front fields hold a POINTER (SRAM
+	 * offset) to where the actual index lives, not the index itself (verified
+	 * by the ch2 dump: 0x382e8/ec/f0 are consecutive addresses). base is the
+	 * data-ring SRAM offset. So rear/front need one more dereference. */
+	rx_rear_a  = APM_SRAM + rd32(ch_desc + 0x10);
+	rx_front_a = APM_SRAM + rd32(ch_desc + 0x14);
 	rx_base    = rd32(ch_desc + 0x18);
-	tx_rear_a  = ch_desc + 0x28;
-	tx_front_a = ch_desc + 0x2C;
+	tx_rear_a  = APM_SRAM + rd32(ch_desc + 0x28);
+	tx_front_a = APM_SRAM + rd32(ch_desc + 0x2C);
 	tx_base    = rd32(ch_desc + 0x30);
 	q_len      = rd32(ch_desc + 0x34);
 	q_esz      = rd32(ch_desc + 0x38);

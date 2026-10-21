@@ -56,6 +56,11 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 	    rsr("elr_el2"), rsr("far_el2"), rsr("spsr_el2"), rsr("hpfar_el2"));
 	out("ELR_EL1 %lx ESR_EL1 %lx\nX0 %lx X1 %lx X30 %lx\n", rsr("elr_el1"), rsr("esr_el1"),
 	    regs[0], regs[1], regs[31]);
+#ifdef SPI_PROBE
+	out("(frozen for photo -- FAR is the faulting address)\n");
+	for (;;)
+		__asm__ volatile("wfe");
+#endif
 	reset_after(10);
 }
 

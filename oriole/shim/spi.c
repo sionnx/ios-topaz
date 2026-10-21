@@ -221,19 +221,21 @@ static void ftm5_bringup(void)
 	wr32(dat, rd32(dat) & ~(1u << RST_PIN));	/* assert reset (low) */
 	__asm__ volatile("dsb sy" ::: "memory");
 
-	/* Power the touch LDOs via ACPM (S2MPG10 LDO25=DVDD, LDO26=AVDD). */
+	/* IPC round-trip verified (reg 0x5C=0x2C, 0x5D=0x3C, both bit7=0 = OFF).
+	 * Enable the touch LDOs: DVDD (LDO25) 1.8V then 1ms later AVDD (LDO26)
+	 * 2.8V, enable bit = 0x80, vsel mask = 0x3F. */
 	acpm_init();
 	uint8_t v = 0;
-	acpm_pmic_read(0x5C, &v);	/* DVDD state before */
-	acpm_pmic_read(0x5D, &v);	/* AVDD state before */
+	acpm_pmic_read(0x5C, &v);	/* before */
+	acpm_pmic_read(0x5D, &v);
 	acpm_pmic_update(0x5C, 0x2C, 0x3F);	/* DVDD 1.8V */
 	acpm_pmic_update(0x5C, 0x80, 0x80);	/* DVDD enable */
 	udelay_(1000);			/* digital before analog */
 	acpm_pmic_update(0x5D, 0x28, 0x3F);	/* AVDD 2.8V */
 	acpm_pmic_update(0x5D, 0x80, 0x80);	/* AVDD enable */
 	udelay_(5000);			/* regulators settle */
-	acpm_pmic_read(0x5C, &v);	/* DVDD state after */
-	acpm_pmic_read(0x5D, &v);	/* AVDD state after */
+	acpm_pmic_read(0x5C, &v);	/* confirm bit7 set */
+	acpm_pmic_read(0x5D, &v);
 
 	udelay_(10000);			/* hold reset 10 ms with power up */
 	wr32(dat, rd32(dat) | (1u << RST_PIN));		/* release reset (high) */

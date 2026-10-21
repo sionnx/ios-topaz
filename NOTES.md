@@ -79,8 +79,21 @@ updates like the Linux acpm_mfd driver. Facts baked in (all from source/live DT)
   on, 5ms, 10ms, reset high, 60ms, read chip id. Reset gpp26-0 active low.
 - FTM5 SPI read frame + reset polarity were already correct; only LDO power was
   missing. Image = `oriole/shim/out/shim-boot.img` (SPI_PROBE=1 GPP23_OFF=0x60),
-  freezes on panel (photos IMG_4336-4340). NEXT: user gets phone to fastboot,
-  `fastboot boot` it, photo the ACPM dump + chip id; expect 36 48 if LDOs enable.
+  freezes on panel (photos IMG_4336-4340).
+
+**🎉 FTM5 CHIP ID = 36 48 OK (2026-10-21, photo IMG_4346). FULL TOUCH SPI PATH
+VERIFIED END TO END on the Pixel 6.** ACPM IPC works (reg 0x5C/0x5D read rc0
+status0), both touch LDOs enabled (read back 0x5C=0xAC DVDD on+1.8V, 0x5D=0xA8
+AVDD on+2.8V), FTM5 powered + reset released, raw rx `fb 00 20 .. 36 .. 48`,
+chip id **36 48**. The whole chain is proven: SPI11 bring-up + CMU clock +
+gpp23 pinmux + CS_AUTO + ACPM->S2MPG10 LDO25/26 power + gpp26-0 reset + chip-id
+read. Two bugs found via the dump: (1) rear/front in channel_info are POINTERS
+(SRAM offsets to the index), need a second rd32(APM_SRAM+ptr) - using the
+pointer as the index flung the ring slot to an illegal address and reset the
+system into recovery; (2) both LDOs default OFF (bit7=0: 0x5C was 0x2C, 0x5D
+0x3C), set bit7 to enable. NEXT: write the kernel driver `bsd/dev/oriole_touch.c`
+(same SPI11 + ACPM bring-up, reset, poll the event FIFO cmd 0x87 / 8-byte events
+-> sweet_hid_touch, gated to oriole) so SpringBoard gets touch on the Pixel 6.
 
 
 
